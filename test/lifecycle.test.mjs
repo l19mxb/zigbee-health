@@ -98,8 +98,11 @@ test('v0.1 incident schema migrates safely and retired state/links survive reope
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'zigbee-lifecycle-')),file=path.join(dir,'health.db');
   try{
     const db=new DatabaseSync(file);db.exec('CREATE TABLE incidents(id TEXT PRIMARY KEY,device_id TEXT,network_id TEXT NOT NULL,category TEXT NOT NULL,priority TEXT NOT NULL,opened_at INTEGER NOT NULL,restored_at INTEGER,ack_at INTEGER,ack_by TEXT,processed_at INTEGER,rearm INTEGER NOT NULL DEFAULT 0,description TEXT NOT NULL)');db.close();
-    let s=new Store(file),e=new Engine(s);const f=fixture();s.saveNetwork(f.s.network('a'));s.saveDevice(f.s.device(f.id));f.s.close();
-    e.retireDevice({id:f.id,reason:'Archived'},actor);s.close();s=new Store(file);e=new Engine(s);
-    assert.equal(e.snapshot().devices[0].status,'retired');assert.equal(s.all('PRAGMA table_info(incidents)').filter(c=>c.name==='resolution').length,1);s.close();
+    let s=new Store(file),e=new Engine(s);const f=fixture(),successor=f.inventory('b');
+    for(const n of f.s.networks())s.saveNetwork(n);for(const d of f.s.devices())s.saveDevice(d);f.s.close();
+    e.retireDevice({id:f.id,reason:'Archived'},actor);e.linkDevice({sourceId:f.id,targetId:successor,kind:'moved',reason:'Moved network'},actor);
+    s.close();s=new Store(file);e=new Engine(s);
+    assert.equal(e.snapshot().devices.find(d=>d.id===f.id).status,'retired');assert.equal(e.report(successor).links[0].device.id,f.id);
+    assert.equal(s.all('PRAGMA table_info(incidents)').filter(c=>c.name==='resolution').length,1);s.close();
   }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
