@@ -1,0 +1,25 @@
+/* Desktop density follows the reviewed command-centre concept. */
+.workspace-signout{margin-top:14px;border-color:#617282;background:transparent;color:white;font-size:11px;min-height:29px;padding:4px 9px}
+@media(min-width:761px){
+  h1{font-size:32px}.sidebar nav{gap:2px}.panel-heading h2{font-size:22px}
+  table,th button,.device-name{font-size:14px}.badge{font-size:11.5px}
+  .alarm-row .row-subtitle{display:inline;font-size:12px;margin-left:7px}
+  .alarm-row td{height:37px;padding-top:6px;padding-bottom:6px}
+  .device-panel .row-subtitle{display:none}.device-panel td{height:37px;padding-top:5px;padding-bottom:5px}
+  .device-panel .panel-heading{min-height:48px;padding-top:8px;padding-bottom:8px}
+  td .icon-button{min-height:24px;height:24px;min-width:28px;padding:3px}
+  .device-panel .device-scroll{max-height:182px}.healthy-panel .device-scroll{max-height:146px}
+  .pagination{min-height:48px;padding-top:8px;padding-bottom:8px}
+  .heading-inline .muted{font-size:14px}.header-controls .search{width:310px}
+  .alarm-summary{gap:28px}.counter{font-size:13px;min-width:150px}
+  .threshold-grid .field{grid-template-columns:230px 1fr;font-size:14px}
+  .retention-row .field{grid-template-columns:230px 1fr;font-size:14px}
+  .config-panel h3{font-size:20px}.config-intro{font-size:14px}
+}
+@media(min-width:761px) and (max-width:1250px){
+  .header-controls .search{width:auto}.heading-inline .muted{font-size:12px}
+  .alarm-summary{gap:12px}.counter{min-width:0;font-size:12px}
+  table,th button,.device-name{font-size:12px}.alarm-row .row-subtitle{font-size:10px}
+  .threshold-grid .field{grid-template-columns:1fr;font-size:12px}
+  .retention-row .field{grid-template-columns:1fr 180px}
+}

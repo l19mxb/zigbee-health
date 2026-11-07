@@ -1,0 +1,41 @@
+name: zigbee-health
+services:
+  dashboard:
+    build: .
+    image: zigbee-health:0.2.0
+    container_name: zigbee-health
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 0.75
+    stop_grace_period: 20s
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-18920}:8080"
+    environment:
+      HOST: 0.0.0.0
+      PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
+      PORT: "8080"
+      DATA_DIR: /app/data
+      TZ: ${TZ:-UTC}
+      APP_PASSWORD: ${ZIGBEE_HEALTH_PASSWORD:?Set a unique password of at least 12 characters}
+    volumes:
+      - dashboard-data:/app/data
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "3"
+volumes:
+  dashboard-data:
+    name: zigbee-health-data

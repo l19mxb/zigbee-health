@@ -1,0 +1,29 @@
+{
+  "name": "zigbee-health",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "start": "node server/index.mjs",
+    "demo": "node server/index.mjs --demo",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "mqtt": "5.16.1",
+    "nodemailer": "10.3.1",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "6.1.2",
+    "aedes": "0.51.3",
+    "vite": "8.3.4"
+  },
+  "license": "MIT",
+  "packageManager": "pnpm@11.25.0"
+}
