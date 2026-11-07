@@ -20,6 +20,7 @@ export class DeviceLifecycle {
       this.s.saveDevice({...d, retiredAt: now, retiredBy: actor, retirementReason: note});
       this.s.run("UPDATE incidents SET resolution=CASE WHEN restored_at IS NULL THEN 'retired' ELSE resolution END, restored_at=coalesce(restored_at,?), processed_at=? WHERE device_id=? AND processed_at IS NULL", now, now, id);
       this.s.run("UPDATE outbox SET status='suppressed',finished_at=? WHERE status='queued' AND incident_id IN (SELECT id FROM incidents WHERE device_id=?)", now, id);
+      this.s.run("UPDATE push_outbox SET status='suppressed',finished_at=? WHERE status='queued' AND incident_id IN (SELECT id FROM incidents WHERE device_id=?)",now,id);
       this.s.run('DELETE FROM conditions WHERE scope=?', id);
       this.s.run("UPDATE shunts SET cancelled_at=? WHERE scope_type='device' AND scope_id=? AND cancelled_at IS NULL AND expired_at IS NULL", now, id);
       this.s.event('device_retired', note, {deviceId:id, networkId:d.networkId, actor, at:now});
@@ -45,6 +46,7 @@ export class DeviceLifecycle {
     if (this.s.one("SELECT id FROM outbox WHERE status='delivering' AND incident_id IN (SELECT id FROM incidents WHERE device_id=?)",id)) throw Error('Wait for the in-progress email attempt before deleting history');
     const counts = this.historyCounts(id);
     this.s.transaction(() => {
+      this.s.run('DELETE FROM push_outbox WHERE incident_id IN (SELECT id FROM incidents WHERE device_id=?)',id);
       this.s.run('DELETE FROM outbox WHERE incident_id IN (SELECT id FROM incidents WHERE device_id=?)',id);
       for (const table of ['samples','incidents','events']) this.s.run(`DELETE FROM ${table} WHERE device_id=?`,id);
       this.s.run("DELETE FROM shunts WHERE scope_type='device' AND scope_id=?",id);

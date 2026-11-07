@@ -3,7 +3,7 @@ import {DeviceLifecycle} from './lifecycle.mjs';
 import {defaults} from './store.mjs';
 
 const HOUR=3600000,DAY=24*HOUR;
-export const labels={offline:'Offline',stale:'Stale reading',battery:'Low battery',signal:'Weak signal',flapping:'Repeated dropouts',missing:'Missing from inventory',broker:'Broker unavailable',bridge:'Bridge unavailable'};
+export const labels={offline:'Offline',stale:'Stale reading',battery:'Low battery',signal:'Weak signal',flapping:'Repeated dropouts',missing:'Missing from inventory',broker:'Broker unavailable',bridge:'Bridge unavailable',subscription:'Topic subscription rejected'};
 export const uid=()=>crypto.randomUUID();
 export const deviceId=(network,ieee)=>network+':'+ieee.toLowerCase();
 const numeric=(v,min,max)=>typeof v==='number'&&Number.isFinite(v)&&v>=min&&v<=max?v:null;
@@ -11,8 +11,8 @@ export class Engine extends DeviceLifecycle {
   constructor(store,{clock=()=>Date.now(),demo=false,timezone=process.env.TZ||'UTC'}={}){super();new Intl.DateTimeFormat('en-GB',{timeZone:timezone});this.timezone=timezone;this.s=store;this.clock=clock;this.demo=demo;this.lastPrune=0;}
   now(){return this.clock();}
   thresholds(d){return {...defaults,...this.s.get('thresholds'),...d?.overrides};}
-  sourceStatus(n){if(!n.enabled)return 'disabled';if(!n.connected)return this.now()-(n.attemptAt||this.now())<this.thresholds().faultDelaySec*1000?'connecting':'offline';return n.bridgeState==='online'?'online':n.bridgeState==='offline'?'offline':'unknown';}
-  connection(id,connected,error=null){const n=this.s.network(id);if(!n)return;const was=n.connected;n.connected=connected;n.error=error;n.attemptAt=n.attemptAt||this.now();if(connected){n.connectedAt=this.now();n.bridgeState='unknown';n.bridgeAt=null;}this.s.saveNetwork(n);if(was!==connected)this.s.event(connected?'broker_connected':'broker_disconnected',connected?'MQTT connection established':'MQTT connection unavailable',{networkId:id,at:this.now()});}
+  sourceStatus(n){if(!n.enabled)return 'disabled';if(!n.connected)return this.now()-(n.attemptAt||this.now())<this.thresholds().faultDelaySec*1000?'connecting':'offline';if(n.mode==='mqtt')return 'online';return n.bridgeState==='online'?'online':n.bridgeState==='offline'?'offline':'unknown';}
+  connection(id,connected,error=null){const n=this.s.network(id);if(!n)return;const was=n.connected;n.connected=connected;if(connected||error!==null)n.error=error;n.attemptAt=n.attemptAt||this.now();if(connected){n.connectedAt=this.now();n.bridgeState='unknown';n.bridgeAt=null;n.inventoryAt=null;n.subscriptionStatus='pending';}this.s.saveNetwork(n);if(was!==connected)this.s.event(connected?'broker_connected':'broker_disconnected',connected?'MQTT connection established':'MQTT connection unavailable',{networkId:id,at:this.now()});}
   ingest(networkId,topic,payload,{retain=false}={}){
     const n=this.s.network(networkId);if(!n)return;
     const base=n.baseTopic+'/',name=topic.startsWith(base)?topic.slice(base.length):null;if(name===null)return;
@@ -24,7 +24,7 @@ export class Engine extends DeviceLifecycle {
       n.bridgeState=value;n.bridgeAt=now;this.s.saveNetwork(n);return;
     }
     if(name==='bridge/devices'&&Array.isArray(p)){
-      if(p.length>4096)return;
+      if(p.length>4096)return;n.inventoryAt=now;this.s.saveNetwork(n);
       const seen=new Set();
       this.s.transaction(()=>{
         for(const x of p){if(x.type==='Coordinator'||!/^0x[0-9a-f]{16}$/i.test(x.ieee_address||''))continue;
@@ -93,6 +93,8 @@ export class Engine extends DeviceLifecycle {
     for(const n of this.s.networks()){
       if(!n.enabled)continue;const source=this.sourceStatus(n),t=this.thresholds(),scope='network:'+n.id;
       this.condition({scope,networkId:n.id,category:'broker',value:!n.connected,priority:'critical',description:n.label+': MQTT broker is unreachable',thresholds:t});
+      this.condition({scope,networkId:n.id,category:'subscription',value:n.connected?n.subscriptionStatus==='denied':null,description:n.label+': selected MQTT topics were rejected',thresholds:t});
+      if(n.mode==='mqtt')continue;
       this.condition({scope,networkId:n.id,category:'bridge',value:!n.connected?null:n.bridgeState!=='online',priority:'critical',description:n.label+': Zigbee2MQTT bridge is unavailable',thresholds:t});
       if(source!=='online')continue;
       for(const d of this.s.devices(n.id)){
@@ -154,6 +156,8 @@ export class Engine extends DeviceLifecycle {
     this.s.run('DELETE FROM samples WHERE bucket<?',cutoff);
     this.s.run('DELETE FROM events WHERE at<? AND (incident_id IS NULL OR incident_id NOT IN (SELECT id FROM incidents WHERE processed_at IS NULL))',cutoff);
     this.s.run('DELETE FROM outbox WHERE incident_id IN (SELECT id FROM incidents WHERE processed_at IS NOT NULL AND processed_at<?)',cutoff);
+    this.s.run('DELETE FROM push_outbox WHERE incident_id IN (SELECT id FROM incidents WHERE processed_at IS NOT NULL AND processed_at<?)',cutoff);
+    this.s.run("DELETE FROM push_outbox WHERE kind='test' AND created_at<?",cutoff);
     this.s.run('DELETE FROM incidents WHERE processed_at IS NOT NULL AND processed_at<?',cutoff);
     this.s.run('DELETE FROM shunts WHERE (cancelled_at IS NOT NULL AND cancelled_at<?) OR (expired_at IS NOT NULL AND expired_at<?)',cutoff,cutoff);
     this.s.set('lastPruneAt',this.now());

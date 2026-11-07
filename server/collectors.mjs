@@ -1,33 +1,52 @@
 import mqtt from 'mqtt';
 import crypto from 'node:crypto';
 import nodemailer from 'nodemailer';
+import {TopicLog} from './topic-log.mjs';
 
+function connectionError(error){
+  if(error.code==='ECONNREFUSED')return 'Connection refused. Check the broker address and port.';
+  if(['ENOTFOUND','EAI_AGAIN'].includes(error.code))return 'Broker hostname could not be resolved.';
+  if(['ETIMEDOUT','ECONNRESET'].includes(error.code))return 'Broker connection timed out or closed.';
+  if([4,5,134,135].includes(error.code))return 'Broker rejected authentication. Check credentials and access.';
+  return 'MQTT connection failed. Check address, credentials and access.';
+}
 export class Collectors {
-  constructor(engine){this.e=engine;this.clients=new Map();this.closed=false;}
+  constructor(engine){this.e=engine;this.clients=new Map();this.closed=false;this.logs=new TopicLog({clock:()=>engine.now()});this.stats=new Map();}
+  traffic(){return Object.fromEntries(this.stats);}
   reconcile(){
     const networks=this.e.s.networks(),wanted=new Set(networks.filter(n=>n.enabled).map(n=>n.id));
-    for(const [id,entry] of this.clients)if(!wanted.has(id)||entry.signature!==this.signature(this.e.s.network(id))){this.clients.delete(id);entry.client.end(true);this.e.connection(id,false);}
+    for(const [id,entry] of this.clients)if(!wanted.has(id)||entry.signature!==this.signature(this.e.s.network(id))){this.clients.delete(id);entry.client.end(true);this.e.connection(id,false);this.logs.remove(id);this.stats.delete(id);}
     if(this.e.demo||this.closed)return;
     for(const n of networks)if(n.enabled&&!this.clients.has(n.id))this.connect(n);
   }
-  signature(n){return JSON.stringify([n.host,n.port,n.protocol,n.baseTopic,n.username,n.password,n.enabled,n.configRevision]);}
+  signature(n){return JSON.stringify([n.host,n.port,n.protocol,n.baseTopic,n.mode||'zigbee2mqtt',n.topicFilters||[],n.username,n.password,n.enabled,n.configRevision]);}
   connect(n){
-    n.attemptAt=this.e.now();n.connected=false;n.bridgeState='unknown';this.e.s.saveNetwork(n);
+    n.attemptAt=this.e.now();n.connected=false;n.bridgeState='unknown';n.inventoryAt=null;n.subscriptionStatus='pending';this.e.s.saveNetwork(n);
     const host=n.host.includes(':')?'['+n.host+']':n.host;
-    const client=mqtt.connect(`${n.protocol}://${host}:${n.port}`,{clientId:'zigbee-health-'+crypto.randomBytes(8).toString('hex'),clean:true,connectTimeout:8000,reconnectPeriod:10000,queueQoSZero:false,keepalive:30,...(n.username?{username:n.username,password:this.e.s.unseal(n.password)}:{})});
-    // No will, bootstrap query, control publication, or network-map scan.
+    const client=mqtt.connect(n.protocol+'://'+host+':'+n.port,{clientId:'zigbee-health-'+crypto.randomBytes(8).toString('hex'),clean:true,connectTimeout:8000,reconnectPeriod:10000,queueQoSZero:false,keepalive:30,...(n.username?{username:n.username,password:this.e.s.unseal(n.password)}:{})});
     client.publish=()=>{throw Error('The Zigbee Health collector is subscription-only');};
     this.clients.set(n.id,{client,signature:this.signature(n)});
     let inventoryReady=false;
     const current=()=>this.clients.get(n.id)?.client===client;
-    client.on('connect',()=>{if(!current())return;inventoryReady=false;this.e.connection(n.id,true);client.subscribe(n.baseTopic+'/bridge/devices',{qos:0});});
+    const subscriptionStatus=value=>{if(!current())return;const latest=this.e.s.network(n.id);latest.subscriptionStatus=value;this.e.s.saveNetwork(latest);};
+    const subscribe=topics=>{
+      if(!topics.length){subscriptionStatus('ready');return;}
+      client.subscribe(topics,{qos:0},(error,grants)=>{if(!current())return;subscriptionStatus(error||grants?.some(g=>g.qos>=128)?'denied':'ready');});
+    };
+    client.on('connect',()=>{
+      if(!current())return;inventoryReady=false;this.e.connection(n.id,true);
+      subscribe(n.mode==='mqtt'?n.topicFilters||[]:[n.baseTopic+'/bridge/devices',n.baseTopic+'/bridge/state']);
+    });
     client.on('message',(topic,data,packet)=>{
       if(!current()||data.length>2*1024*1024)return;
+      this.logs.add(n.id,topic,data,packet);
+      const stats=this.stats.get(n.id)||{messages:0,lastMessageAt:null};stats.messages++;stats.lastMessageAt=this.e.now();this.stats.set(n.id,stats);
+      if(n.mode==='mqtt')return;
       if(topic===n.baseTopic+'/bridge/devices'){
-        try{const p=JSON.parse(data.toString());if(!Array.isArray(p))return;this.e.ingest(n.id,topic,p,{retain:packet.retain});if(!inventoryReady){inventoryReady=true;client.subscribe(n.baseTopic+'/#',{qos:0});}}catch{}
-      }else if(inventoryReady)this.e.ingest(n.id,topic,data.toString(),{retain:packet.retain});
+        try{const p=JSON.parse(data.toString());if(!Array.isArray(p)||p.length>4096)return;this.e.ingest(n.id,topic,p,{retain:packet.retain});if(!inventoryReady){inventoryReady=true;subscribe([n.baseTopic+'/#']);}}catch{}
+      }else if(inventoryReady||topic===n.baseTopic+'/bridge/state')this.e.ingest(n.id,topic,data.toString(),{retain:packet.retain});
     });
-    client.on('error',()=>{if(current())this.e.connection(n.id,false,'MQTT connection failed. Check address, credentials and access.');});
+    client.on('error',error=>{if(current())this.e.connection(n.id,false,connectionError(error));});
     client.on('close',()=>{if(current())this.e.connection(n.id,false);});
   }
   async close(){this.closed=true;await Promise.all([...this.clients.values()].map(({client})=>new Promise(resolve=>client.end(true,resolve))));this.clients.clear();}

@@ -18,6 +18,8 @@ networks. Try the isolated simulation without connecting to a broker.
 - Retirement/restoration, confirmed history deletion and links for moved or
   replacement devices.
 - SMTP fault/recovery notifications with duplicate suppression and delivery history.
+- Installable PWA with browser push, individual browser removal and delivery history.
+- Optional MQTT broker connection monitoring and a bounded live topic log.
 - Editable **90-day default retention**. Working alarms, active shunts and current
   configuration survive history cleanup.
 
@@ -41,6 +43,9 @@ To reset it, stop the app and remove only that simulation directory.
 `pnpm start` opens a separate live workspace in `data/live` with no brokers and
 email disabled. Add each network in Configuration, then enable its connection.
 New broker entries start disabled. Simulation databases cannot open as live data.
+Existing installations keep their database, credential key, brokers and SMTP
+settings when upgrading. Back up the data directory first; do not start a blank
+volume over an existing installation.
 
 For development, start the backend and run `pnpm dev` in another terminal. Vite
 uses port 18921 and proxies the API to port 18920.
@@ -65,7 +70,7 @@ access; do not expose the unencrypted administrative interface to the internet.
 | `HOST` | `127.0.0.1` | Native bind address; Compose uses `0.0.0.0` internally |
 | `PORT` | `18920` | Native port; Compose uses `8080` internally |
 | `DATA_DIR` | `data/live` or `data/simulation` | Database/key directory |
-| `PUBLIC_HOST` | empty | Additional permitted browser hostname |
+| `PUBLIC_HOST` | empty | Additional permitted browser hostname(s), comma separated |
 | `APP_PASSWORD` | empty | Native login password; required outside loopback |
 | `TZ` | `UTC` | IANA timezone for displayed timestamps, including DST |
 | `BIND_ADDRESS` | `127.0.0.1` | Compose host bind address |
@@ -118,6 +123,73 @@ and shunts suppress pending fault messages. An accepted alarm can have one
 recovery message. “Accepted” means SMTP acceptance, not inbox delivery. Ambiguous
 attempts remain uncertain and are never automatically retried.
 
+### Other MQTT brokers and live logs
+
+Choose **MQTT broker & topic log** for a broker without Zigbee2MQTT. This monitors
+the MQTT connection and rejected subscriptions; it does not infer individual
+service/device health from arbitrary messages. Leave topic filters empty for
+connection-only monitoring, or add up to 20 filters, one per line. For example,
+`service/available` or `board/+/state`. Zigbee2MQTT remains the default mode.
+
+**Live log** shows the latest 200 received messages per entry, newest first, with
+retained flags, filtering and pause. Logs are held only in memory and clear on
+restart, disabling or reconfiguration. Previews are limited to 1,000 characters;
+large/binary payloads are omitted and common secret fields are redacted. Redaction
+cannot recognise every secret: limit topic scope and review before sharing.
+No broad wildcard is selected by default for generic brokers.
+
+MQTT connected and Zigbee inventory/bridge state are displayed separately. A
+connected broker with no inventory might use a different base topic or have no
+Zigbee2MQTT bridge. A network with device history cannot change mode; add another
+entry to preserve its history.
+
+## Installable app and browser notifications
+
+Android Chrome is the primary target. Web Push requires a secure HTTPS origin,
+a service worker and an explicit permission grant. The LAN HTTP address remains
+usable as a dashboard but cannot enrol normal browser push subscriptions.
+
+1. Route an HTTPS hostname through your reverse proxy or Cloudflare Tunnel to
+   the existing dashboard HTTP origin. Preserve the public `Host` header. Keep
+   the app password and any existing access protection enabled.
+2. In **Configuration → App & notifications**, save that root HTTPS address
+   (for example `https://health.example.test`) and enable push delivery. This
+   also permits the hostname at the app. Public-host sessions use Secure cookies.
+3. Open that HTTPS address in Android Chrome, sign in, choose **Enable on this
+   device**, and allow notifications. Give each browser a recognisable label.
+4. Use **Send test** and verify the notification on the named phone. Install via
+   Chrome's menu → Add to Home screen → Install, or the in-app Install button
+   when Chrome offers it.
+
+The push service receives an encrypted payload; the service worker displays it
+without fetching an authenticated API in the background. Tapping it opens the
+alarm viewer, where an expired app/proxy login may require signing in again.
+It never acknowledges or shunts an alarm. Proxy access rules must allow the
+authenticated browser to register the service worker and load its assets; verify
+your actual proxy/phone combination after setup.
+
+Device names/descriptions are omitted by default for lock-screen privacy. New
+subscriptions receive future alarms without replaying the current stack. Fault
+and optional recovery notifications follow acknowledgement/shunt rules. The
+push service's acceptance does not prove handset delivery. Messages expire after
+five minutes; ambiguous outcomes are recorded without automatic retries. Expired
+subscriptions are disabled, and can be enabled again from the browser.
+
+Changing the HTTPS app address disables existing subscriptions. Signing out does
+not disable push: remove the browser in notification settings to stop it. Android
+permissions, battery restrictions and connectivity affect delivery. Keep SMTP as
+a separate fallback where desired. Simulation cannot enrol or send real push.
+
+VAPID signing keys and browser subscription secrets are encrypted using the same
+data-directory key as other credentials. Preserve that directory during updates
+and backups. No third-party push account or API key is required; the server needs
+outbound HTTPS access to the browser's push provider. Supported endpoints include
+Chrome/FCM, Firefox, Apple Web Push and Windows push services.
+
+Offline mode displays an explicit connection-unavailable page. Only generic
+offline assets are cached; API responses, alarm states and authenticated pages
+are never cached by the service worker.
+
 ## Storage and backup
 
 SQLite keeps five-minute measurement summaries and individual incident/event
@@ -156,4 +228,5 @@ personal information before sharing issues, logs or screenshots.
 ## License
 
 [MIT](LICENSE), copyright Zigbee Health contributors. Dependencies retain their
-own licenses. No code from other Zigbee dashboards is included.
+own licenses; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). No code from
+other Zigbee dashboards is included.

@@ -4,6 +4,7 @@ COPY package.json pnpm-lock.yaml ./
 RUN npm install --global pnpm@11.25.0 && pnpm install --frozen-lockfile
 COPY index.html vite.config.mjs ./
 COPY src ./src
+COPY public ./public
 RUN pnpm build && pnpm prune --prod
 
 FROM node:24-bookworm-slim

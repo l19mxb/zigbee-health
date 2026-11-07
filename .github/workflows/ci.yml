@@ -30,6 +30,10 @@ jobs:
           for attempt in {1..30}; do
             if curl --fail --silent http://127.0.0.1:18920/api/health > health.json; then
               node -e "const h=require('./health.json');if(h.status!=='ready'||h.mode!=='simulation'||h.mqttPublications!==0)process.exit(1)"
+              curl --fail --silent http://127.0.0.1:18920/manifest.webmanifest | node -e "let b='';process.stdin.on('data',x=>b+=x).on('end',()=>{const m=JSON.parse(b);if(m.display!=='standalone'||m.icons.length!==2)process.exit(1)})"
+              curl --fail --silent http://127.0.0.1:18920/sw.js | node -e "let b='';process.stdin.on('data',x=>b+=x).on('end',()=>{if(!b.includes('notificationclick'))process.exit(1)})"
+              curl --fail --silent http://127.0.0.1:18920/icon-192.png --output /tmp/zh-icon.png
+              node -e "if(require('fs').readFileSync('/tmp/zh-icon.png').readUInt32BE(16)!==192)process.exit(1)"
               exit 0
             fi
             sleep 1

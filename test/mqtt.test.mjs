@@ -28,3 +28,15 @@ test('two actual loopback MQTT brokers: independent discovery, rename, retained 
     assert.equal(publications,0);assert.throws(()=>manager.clients.get('a').client.publish('zigbee2mqtt/anything/set','ON'),/subscription-only/);
   }finally{await manager.close();s.close();await Promise.all([a.close(),b.close()]);}
 });
+
+test('generic MQTT broker is monitored without Zigbee inventory and logs only selected topics without publishing',async()=>{
+  const b=await broker(),s=new Store(),e=new Engine(s),manager=new Collectors(e);let publications=0;
+  try{
+    b.instance.on('publish',(packet,client)=>{if(client?.id.startsWith('zigbee-health-'))publications++;});
+    await publish(b.client,'service/available','online',true);await publish(b.client,'unselected/state',{state:'private'},true);
+    s.saveNetwork({id:'generic',label:'Synthetic service broker',mode:'mqtt',host:'127.0.0.1',port:b.port,protocol:'mqtt',topicFilters:['service/available','board/+/state'],enabled:true});
+    manager.reconcile();await waitFor(()=>manager.logs.read('generic').length===1);e.tick();assert.equal(e.sourceStatus(s.network('generic')),'online');assert.equal(s.devices().length,0);assert.equal(s.all('SELECT * FROM incidents').length,0);assert.equal(manager.logs.read('generic')[0].retained,true);
+    await publish(b.client,'board/one/state',{state:'online',password:'synthetic-secret'});await waitFor(()=>manager.logs.read('generic').length===2);assert.ok(!JSON.stringify(manager.logs.read('generic')).includes('synthetic-secret'));assert.equal(manager.traffic().generic.messages,2);assert.equal(publications,0);
+    const client=manager.clients.get('generic').client;client.emit('error',Object.assign(Error('contains private broker details'),{code:5}));client.emit('close');assert.match(s.network('generic').error,/authentication/);assert.ok(!s.network('generic').error.includes('private'));
+  }finally{await manager.close();s.close();await b.close();}
+});

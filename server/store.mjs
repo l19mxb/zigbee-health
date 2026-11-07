@@ -26,6 +26,10 @@ export class Store {
       CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,incident_id TEXT NOT NULL,kind TEXT NOT NULL,rearm INTEGER NOT NULL,created_at INTEGER NOT NULL,status TEXT NOT NULL,error TEXT,finished_at INTEGER,UNIQUE(incident_id,kind,rearm));`);
     if(!this.all('PRAGMA table_info(incidents)').some(c=>c.name==='resolution'))this.db.exec('ALTER TABLE incidents ADD COLUMN resolution TEXT');
     this.db.exec('CREATE TABLE IF NOT EXISTS device_links(id TEXT PRIMARY KEY,source_id TEXT NOT NULL UNIQUE,target_id TEXT NOT NULL,kind TEXT NOT NULL,reason TEXT NOT NULL,actor TEXT NOT NULL,created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS link_target ON device_links(target_id)');
+    this.db.exec(`CREATE TABLE IF NOT EXISTS push_subscriptions(id TEXT PRIMARY KEY,endpoint_hash TEXT NOT NULL UNIQUE,json TEXT NOT NULL,label TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,disabled_at INTEGER,last_success_at INTEGER,last_error TEXT);
+      CREATE TABLE IF NOT EXISTS push_outbox(id TEXT PRIMARY KEY,incident_id TEXT,subscription_id TEXT NOT NULL,kind TEXT NOT NULL,rearm INTEGER NOT NULL,created_at INTEGER NOT NULL,status TEXT NOT NULL,error TEXT,finished_at INTEGER,UNIQUE(incident_id,subscription_id,kind,rearm));
+      CREATE INDEX IF NOT EXISTS push_outbox_status ON push_outbox(status,created_at);`);
+    this.run("UPDATE push_outbox SET status='uncertain',error='Service stopped during delivery; no automatic retry' WHERE status='delivering'");
     this.db.prepare("UPDATE outbox SET status='uncertain',error='Service stopped during delivery; review before resending' WHERE status='delivering'").run();
     if(!this.get('thresholds'))this.set('thresholds',defaults);
     if(!this.get('createdAt'))this.set('createdAt',Date.now());
