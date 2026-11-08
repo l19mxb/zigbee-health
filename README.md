@@ -26,6 +26,8 @@ to a broker.
 - Light, Dark and System colour themes, remembered in each browser.
 - Residential-style security panel with areas, device zones, Home/Away modes,
   entry/exit delays, bypasses, latched alarm memory and weekly schedules.
+- Search devices by name, network or Zigbee identity when configuring a zone;
+  assign a zone to one or several areas with independent area arming and alarms.
 - Optional security MQTT event messages and SMTP alerts, with an independent
   publisher, configurable message templates and recorded delivery results.
 - Editable **90-day default retention**. Working alarms, active shunts and current
@@ -278,6 +280,9 @@ health monitor, where an expired app/proxy login may require signing in again.
 It never acknowledges or shunts an alarm. Proxy access rules must allow the
 authenticated browser to register the service worker and load its assets; verify
 your actual proxy/phone combination after setup.
+The manifest link includes credentials for the signed-in browser, including when
+an access proxy protects the manifest. Keep that protection enabled; Android
+installation still depends on Chrome and the device's installation policies.
 
 Device names/descriptions are omitted by default for lock-screen privacy. New
 subscriptions receive future alarms without replaying the current stack. Fault

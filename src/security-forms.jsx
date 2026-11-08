@@ -1,4 +1,4 @@
-import React,{useState} from 'react';
+import React,{useRef,useState} from 'react';
 import {Field,Modal} from './ui.jsx';
 
 const week=[['Sun',0],['Mon',1],['Tue',2],['Wed',3],['Thu',4],['Fri',5],['Sat',6]];
@@ -7,15 +7,40 @@ const payloadExample=JSON.stringify({event:'security_alarm',area:'{{area}}',zone
 const presets={contact:{property:'contact',operator:'eq',value:false},motion:{property:'occupancy',operator:'eq',value:true},vibration:{property:'vibration',operator:'eq',value:true}};
 function zonePreset(item){return Object.entries(presets).find(([,value])=>value.property===item?.property&&value.operator===item?.operator&&value.value===item?.value)?.[0]||'custom';}
 const availableDevices=state=>state.eligibleDevices||state.candidates||state.devices||[];
+const memberIds=zone=>Array.isArray(zone?.areaIds)&&zone.areaIds.length?zone.areaIds:zone?.areaId?[zone.areaId]:[];
+const editableArea=area=>area?.mode==='disarmed'&&!['exit_delay','entry_delay'].includes(area.status);
 const initial=(kind,item,state,areaId)=>{
   if(kind==='area')return {name:'',entryDelaySec:30,exitDelaySec:45,enabled:true,...item};
-  if(kind==='zone')return {name:'',areaId:areaId||state.areas[0]?.id||'',deviceId:'',property:'contact',operator:'eq',value:false,type:'instant',homeBypass:false,enabled:true,freshnessMin:1500,...item};
+  if(kind==='zone')return {name:'',deviceId:'',property:'contact',operator:'eq',value:false,type:'instant',homeBypass:false,enabled:true,freshnessMin:1500,...item,areaIds:item?memberIds(item):[areaId||state.areas.find(editableArea)?.id].filter(Boolean)};
   if(kind==='schedule')return {name:'',areaId:areaId||state.areas[0]?.id||'',days:[1,2,3,4,5],time:'22:00',timezone:state.timezone||'UTC',mode:'away',enabled:false,...item};
   return {name:'',areaId:areaId||state.areas[0]?.id||'',kind:'mqtt',networkId:state.networks[0]?.id||'',topic:'security/alerts',payloadTemplate:payloadExample,subject:'Security alarm: {{area}}',text:'Security alarm in {{area}}.\nZone: {{zone}}\nDevice: {{device}}\nMode: {{mode}}\nTime: {{timestamp}}',enabled:false,...item};
 };
-const fieldsFor={area:['id','name','entryDelaySec','exitDelaySec','enabled'],zone:['id','name','areaId','deviceId','property','operator','value','type','homeBypass','enabled','freshnessMin'],schedule:['id','name','areaId','days','time','timezone','mode','enabled'],action:['id','name','areaId','kind','networkId','topic','payloadTemplate','subject','text','enabled']};
+const fieldsFor={area:['id','name','entryDelaySec','exitDelaySec','enabled'],zone:['id','name','areaIds','deviceId','property','operator','value','type','homeBypass','enabled','freshnessMin'],schedule:['id','name','areaId','days','time','timezone','mode','enabled'],action:['id','name','areaId','kind','networkId','topic','payloadTemplate','subject','text','enabled']};
 function AreaSelect({draft,change,state}){return <Field label="Area"><select required value={draft.areaId} onChange={e=>change('areaId',e.target.value)}><option value="" disabled>Choose an area</option>{state.areas.map(area=><option value={area.id} key={area.id} disabled={area.mode!=='disarmed'||['exit_delay','entry_delay'].includes(area.status)}>{area.name}{area.mode!=='disarmed'?' · armed':''}</option>)}</select></Field>;}
 function Check({children,checked,onChange,disabled=false}){return <label className="checkbox-field"><input type="checkbox" checked={checked} disabled={disabled} onChange={e=>onChange(e.target.checked)}/>{children}</label>;}
+
+function AreaMemberships({draft,change,state,locked}){
+  return <fieldset className="security-membership-fieldset" aria-describedby="security-membership-help"><legend>Areas</legend><p id="security-membership-help">Select one or more areas this zone protects.</p><div className="security-membership-options">{state.areas.map(area=><label className="checkbox-field" key={area.id}><input type="checkbox" aria-label={'Include area '+area.name} checked={draft.areaIds.includes(area.id)} disabled={locked||!editableArea(area)} onChange={event=>change('areaIds',event.target.checked?[...draft.areaIds,area.id]:draft.areaIds.filter(id=>id!==area.id))}/><span>{area.name}<small>{editableArea(area)?'Disarmed':area.mode==='disarmed'?'Arming':'Armed · disarm to change'}</small></span></label>)}</div><p className="small muted">{locked?'Reset this zone’s alarm memory before changing its area membership.':'Every linked area must be disarmed before this zone can be changed.'}</p>{draft.areaIds.length>1?<p className="security-shared-warning">Shared zone: activation, zone type, Home-mode bypass and manual bypass apply to every linked area. Each area arms and raises alarms independently.</p>:null}</fieldset>;
+}
+
+function DevicePicker({devices,selectedId,fallback,onChange}){
+  const [search,setSearch]=useState('');
+  const select=useRef(null);
+  const selected=devices.find(device=>device.id===selectedId)||(selectedId?{id:selectedId,name:fallback?.deviceName||'Unavailable device',networkLabel:fallback?.networkLabel||'',disabled:true}:null);
+  const terms=search.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const filtered=devices.filter(device=>{
+    const text=[device.name,device.networkLabel,device.ieee,device.model,device.room].filter(Boolean).join(' ').toLowerCase();
+    const ieee=String(device.ieee||'').toLowerCase().replace(/[\s:.-]/g,'');
+    return terms.every(term=>text.includes(term)||/^(?:0x)?[0-9a-f]{3,}$/.test(term.replace(/[\s:.-]/g,''))&&ieee.includes(term.replace(/[\s:.-]/g,'')));
+  }).toSorted((a,b)=>String(a.name).localeCompare(String(b.name))||String(a.networkLabel).localeCompare(String(b.networkLabel))||a.id.localeCompare(b.id));
+  const retained=selected&&!filtered.some(device=>device.id===selected.id);
+  const option=device=><option key={device.id} value={device.id} disabled={!!device.retiredAt||device.disabled}>{device.name} · {device.networkLabel||'Zigbee network'}{device.retiredAt?' · retired':device.disabled?' · unavailable':''}</option>;
+  return <div className="security-device-picker"><Field label="Search Zigbee devices" hint="Search by friendly name, network, model or IEEE address."><input type="search" autoComplete="off" maxLength={160} value={search} onChange={event=>setSearch(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'){event.preventDefault();select.current?.focus();}}}/></Field>
+    <Field label="Zigbee device"><select ref={select} required size={Math.min(5,Math.max(2,filtered.length+(retained?1:0)+1))} value={selectedId} onChange={event=>onChange(event.target.value)} onKeyDown={event=>{if(event.key==='Enter')event.preventDefault();}}><option value="" disabled>Choose a device</option>{retained?<optgroup label="Selected device (kept)">{option(selected)}</optgroup>:null}{filtered.length?<optgroup label={terms.length?'Matching devices':'Available devices'}>{filtered.map(option)}</optgroup>:null}</select></Field>
+    <p className={'security-device-results '+(!filtered.length?'no-results':'')} role="status" aria-live="polite">{filtered.length?filtered.length+' matching '+(filtered.length===1?'device':'devices'):'No devices match this search.'}{retained?' Your selected device is unchanged.':''}</p>
+    {selected?<p className="security-device-selection"><strong>Selected:</strong> {selected.name}{selected.networkLabel?' · '+selected.networkLabel:''}{selected.ieee?<code>{selected.ieee}</code>:null}{selected.disabled||selected.retiredAt?<span className="security-device-unavailable">Choose a current device before saving.</span>:null}</p>:null}
+  </div>;
+}
 
 export function SecurityForm({kind,item,state,areaId,onClose,onSave}){
   const [draft,setDraft]=useState(()=>initial(kind,item,state,areaId));
@@ -27,10 +52,14 @@ export function SecurityForm({kind,item,state,areaId,onClose,onSave}){
   const label=kind==='area'?'area':kind==='zone'?'zone':kind==='schedule'?'schedule':'alert action';
   const devices=availableDevices(state),chosenDevice=devices.find(device=>device.id===draft.deviceId);
   const properties=(chosenDevice?.properties||[]).map(value=>typeof value==='string'?value:value.property).filter(Boolean);
+  const membershipLocked=kind==='zone'&&!!item&&(state.incidents||[]).some(incident=>incident.zoneId===item.id&&incident.resetAt==null);
   async function submit(event){
     event.preventDefault();setError('');
     const body=Object.fromEntries(fieldsFor[kind].filter(key=>draft[key]!==undefined).map(key=>[key,draft[key]]));
     if(kind==='zone'){
+      if(!body.areaIds.length){setError('Select at least one area for this zone.');return;}
+      const linkedIds=new Set([...memberIds(item),...body.areaIds]);
+      if([...linkedIds].some(id=>!editableArea(state.areas.find(area=>area.id===id)))){setError('Disarm every linked area before changing this zone.');return;}
       if(preset!=='custom')Object.assign(body,presets[preset]);
       else{
         body.value=valueType==='boolean'?customValue==='true':valueType==='number'?Number(customValue):customValue;
@@ -53,9 +82,9 @@ export function SecurityForm({kind,item,state,areaId,onClose,onSave}){
       <div className="security-field-pair"><Field label="Entry delay" type="number" min={0} max={600} required unit="seconds" value={draft.entryDelaySec} onChange={e=>change('entryDelaySec',Number(e.target.value))}/><Field label="Exit delay" type="number" min={0} max={600} required unit="seconds" value={draft.exitDelaySec} onChange={e=>change('exitDelaySec',Number(e.target.value))}/></div>
       <p className="small muted">Entry zones use the entry delay. Instant zones raise an alarm immediately after the area is armed.</p>
       <Check checked={draft.enabled} onChange={value=>change('enabled',value)}>Area enabled</Check>
-    </>:<AreaSelect draft={draft} change={change} state={state}/>}
+    </>:kind==='zone'?<AreaMemberships draft={draft} change={change} state={state} locked={membershipLocked}/>:<AreaSelect draft={draft} change={change} state={state}/>}
     {kind==='zone'?<>
-      <Field label="Zigbee device"><select required value={draft.deviceId} onChange={e=>{const device=devices.find(value=>value.id===e.target.value);change('deviceId',e.target.value);if(!draft.name&&device)change('name',device.name);}}><option value="" disabled>Choose a device</option>{devices.map(device=><option value={device.id} key={device.id} disabled={!!device.retiredAt||device.disabled}>{device.name} · {device.networkLabel||'Zigbee network'}{device.retiredAt?' · retired':''}</option>)}</select></Field>
+      <DevicePicker devices={devices} selectedId={draft.deviceId} fallback={item} onChange={id=>{const device=devices.find(value=>value.id===id);change('deviceId',id);if(!draft.name&&device)change('name',device.name);}}/>
       <Field label="Activation"><select value={preset} onChange={e=>{const next=e.target.value,condition=presets[next]||presets[preset];if(condition){setDraft(current=>({...current,...condition}));setValueType(typeof condition.value);setCustomValue(String(condition.value));}setPreset(next);}}><option value="contact">Door / window opens</option><option value="motion">Motion / presence detected</option><option value="vibration">Vibration detected</option><option value="custom">Custom condition</option></select></Field>
       {preset!=='custom'?<p className="security-condition-preview">{preset==='contact'?'Open (contact = false)':preset==='motion'?'Motion detected (occupancy = true)':'Vibration detected (vibration = true)'}</p>:<>
         <Field label="Activation property" hint="Choose a reported property or enter its exact name."><input required list="security-zone-properties" maxLength={80} value={draft.property} onChange={e=>change('property',e.target.value)}/></Field><datalist id="security-zone-properties">{properties.map(property=><option key={property} value={property}/>)}</datalist>
@@ -115,8 +144,10 @@ export function SecurityCommandDialog({area,action,zones,onClose,onSave}){
 
 export function SecurityBypassDialog({zone,clear=false,onClose,onSave}){
   const [duration,setDuration]=useState('60'),[reason,setReason]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
+  const linkedAreas=zone.areaNames||zone.areaStates?.map(area=>area.areaName).filter(Boolean)||[];
   return <Modal title={(clear?'Clear bypass':'Bypass zone')+' · '+zone.name} onClose={()=>{if(!busy)onClose();}}><form className="security-form" onSubmit={async event=>{event.preventDefault();setBusy(true);setError('');try{await onSave('security/'+(clear?'clear-bypass':'bypass'),{id:zone.id,...(!clear?{reason,durationMin:duration==='indefinite'?null:Number(duration)}:{})});}catch(error){setError(error.message);}finally{setBusy(false);}}}>
     <p>{clear?'Return this zone to normal security monitoring. A fresh reading may be needed before it is ready.':'Activations from this zone will not raise new security alarms while it is bypassed.'}</p>
+    {linkedAreas.length?<div className={'notice '+(linkedAreas.length>1?'warning':'')}><strong>{clear?'Clears the bypass in':'Bypasses this zone in'} {linkedAreas.join(', ')}.</strong>{linkedAreas.length>1?' This is one shared zone; the change affects every linked area.':''}</div>:null}
     {!clear?<Field label="Bypass for"><select value={duration} onChange={e=>setDuration(e.target.value)}><option value="15">15 minutes</option><option value="60">1 hour</option><option value="240">4 hours</option><option value="1440">24 hours</option><option value="indefinite">Until manually cleared</option></select></Field>:null}
     {!clear?<Field label="Reason" required maxLength={300} value={reason} onChange={e=>setReason(e.target.value)}/>:null}
     {error?<div className="notice critical" role="alert">{error}</div>:null}
@@ -129,7 +160,7 @@ export function SecurityRemoveDialog({kind,item,onClose,onSave}){
   const label=kind==='action'?'alert action':kind;
   return <Modal title={'Remove '+label} onClose={()=>{if(!busy)onClose();}}><form className="security-form" onSubmit={async event=>{event.preventDefault();setBusy(true);setError('');try{await onSave('security/remove-'+kind,{id:item.id});}catch(error){setError(error.message);}finally{setBusy(false);}}}>
     <p>Remove <strong>{item.name}</strong> from security configuration? Existing alarm and activity history is retained.</p>
-    {kind==='area'?<p className="notice warning">This also removes the area's zones, schedules and alert actions.</p>:null}
+    {kind==='area'?<p className="notice warning">This removes the area's schedules and alert actions. Shared zones remain linked to their other areas; zones assigned only to this area are removed.</p>:kind==='zone'&&memberIds(item).length>1?<p className="notice warning">This removes the shared zone from every linked area: {(item.areaNames||item.areaStates?.map(area=>area.areaName)||[]).join(', ')}.</p>:null}
     <Check checked={confirmed} onChange={setConfirmed}>I understand and want to remove this {label}.</Check>
     {error?<div className="notice critical" role="alert">{error}</div>:null}
     <div className="form-actions"><button type="button" disabled={busy} onClick={onClose}>Cancel</button><button className="danger" disabled={busy||!confirmed}>{busy?'Removing…':'Remove '+label}</button></div>

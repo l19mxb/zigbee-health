@@ -9,8 +9,10 @@ The isolated simulation includes synthetic examples and cannot send real alerts.
 
 1. Open **Security**, then **Add area**. Give the area a name and choose its
    entry and exit delays. New areas are disarmed.
-2. Open **Zones** and add the devices that protect that area. Each zone names a
-   device property and the value that means activation. For a typical
+2. Open **Zones** and add the devices that protect that area. Search the device
+   picker by name, network, model or Zigbee IEEE address. Select one or more
+   **Areas** for the zone. Each zone names a device property and the value that
+   means activation. For a typical
    Zigbee2MQTT contact sensor, `contact: false` means open; for a motion sensor,
    `occupancy: true` means motion. Check your device's actual reported values.
 3. Choose **Entry** for an entry route that should start the area's entry delay,
@@ -24,6 +26,34 @@ Device identities use the existing network and Zigbee IEEE identity. Renaming a
 device preserves its zone link. A retired, disabled, missing or unavailable
 device becomes a zone trouble condition; a replacement device must be selected
 explicitly. Broker/device availability does not itself count as intrusion.
+
+## Shared zones
+
+A zone can belong to several areas. Edit its **Areas** checkboxes to choose the
+memberships. Each selected area includes that same physical detector in its
+readiness checks and evaluates a fresh activation whenever that area is armed.
+For example, a contact assigned to House and Garage can raise two independent
+incidents if both areas are armed. Disarming or acknowledging House does not
+disarm or acknowledge Garage. Each area keeps its own entry/exit delays,
+Home/Away mode, schedules, alarm memory and alert actions.
+
+The zone's name, trigger condition, Entry/Instant type, reporting timeout,
+enabled state and Home-mode exclusion are shared settings. A bypass also applies
+to the zone in **every assigned area**; the panel warns about that scope before
+applying it. Home exclusion follows each area's own mode, so a zone can be
+excluded in a Home-armed area while still protecting an Away-armed area.
+
+Disarm every linked area before changing or removing a shared zone. Adding it
+to another area also requires that new area to be disarmed. Reset the zone's
+alarm memory before changing its memberships. Removing an area detaches its
+membership and retains the shared zone in its remaining areas. Removing the
+last area removes that zone configuration, with audit history retained.
+
+Existing single-area zones keep their original identity and settings when the
+application is upgraded. Memberships are stored separately, so the upgrade does
+not rewrite the existing zone records. An older open browser editing the
+unchanged primary area also preserves the shared memberships; refresh to use
+the multiple-area editor.
 
 ## Operate the panel
 
@@ -43,7 +73,8 @@ explicitly. Broker/device availability does not itself count as intrusion.
   real status and the bypass remain visible. Ending a bypass does not manufacture
   a new sensor activation.
 
-Area configuration is changed while the area is disarmed. The panel is controlled
+Area configuration is changed while the area is disarmed. Removing an area also
+requires all areas sharing its zones to be disarmed. The panel is controlled
 by the signed-in account; it does not implement a separate numeric keypad PIN.
 
 ## Schedules
