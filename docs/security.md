@@ -229,6 +229,8 @@ No PIN is created automatically during an upgrade.
 
 Existing Security panel controls retain their feature permissions. Weekly
 schedules continue to use their configured actions and do not prompt for a PIN.
+An optional [local kiosk](kiosk.md) provides a separate LAN keypad without a
+dashboard login. It has a restricted area scope and keeps PIN-required disarming.
 
 ## Permissions, storage and backup
 

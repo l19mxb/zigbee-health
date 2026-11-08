@@ -28,6 +28,8 @@ to a broker.
   entry/exit delays, bypasses, latched alarm memory and weekly schedules.
 - Responsive tablet keypad with area LEDs, not-ready zone browsing, code-free
   Away arming and personal four-digit PIN disarming.
+- Optional local kiosk page without a dashboard login, restricted to a direct
+  local IP address and administrator-selected networks and areas.
 - Search devices by name, network or Zigbee identity when configuring a zone;
   assign a zone to one or several areas with independent area arming and alarms.
 - Optional security MQTT messages, SMTP alerts and browser push to selected
@@ -192,6 +194,8 @@ access. Existing non-administrator accounts keep their current permissions and
 receive no Security access automatically. Existing administrator passwords,
 stored permissions and remembered sessions are preserved during this upgrade.
 See [Security setup and behaviour](docs/security.md).
+For a wall tablet, see [Local kiosk setup](docs/kiosk.md). The dedicated kiosk
+has its own limited endpoints; the main dashboard still requires sign-in.
 
 ## Device identity and lifecycle
 

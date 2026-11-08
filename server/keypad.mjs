@@ -99,6 +99,23 @@ export class Keypad{
     const matched=crypto.timingSafeEqual(Buffer.from(candidate,'hex'),Buffer.from(expected,'hex'));
     return matched&&row?this.freshUser(row.user_id):null;
   }
+  kioskCommand(input,scope){
+    const body=keys(input,['action','areaIds','all','pin']),scopeIds=this.validateAreas(scope),scopeSet=new Set(scopeIds);
+    allowed(['arm_away','disarm'].includes(body.action),'Choose Arm Away or Disarm');allowed(body.all===undefined||typeof body.all==='boolean','All areas must be on or off');allowed(!(body.all===true&&body.areaIds!==undefined),'Choose selected areas or all areas');
+    const explicit=body.all===true?null:this.validateAreas(body.areaIds);if(explicit)allowed(explicit.length>0,'Select at least one area');let actor=null,areaIds=explicit;
+    if(body.action==='arm_away'){
+      allowed(body.pin===undefined,'Arming does not require a PIN');if(body.all===true)areaIds=scopeIds;allowed(areaIds.every(id=>scopeSet.has(id)),'Choose only areas available on this kiosk',403);
+    }else{
+      this.checkThrottle('pin');actor=this.pinUser(body.pin);if(!hasPermission(actor,'controlSecurity'))return this.rejected({username:'Local kiosk'});
+      const assigned=this.areaIds(actor);if(body.all===true)areaIds=assigned.filter(id=>scopeSet.has(id));if(!areaIds?.length||areaIds.some(id=>!scopeSet.has(id)||!assigned.includes(id)))return this.rejected({username:'Local kiosk'});
+    }
+    allowed(areaIds?.length>0,'No areas are available');const areas=areaIds.map(id=>this.security.requireArea(id));
+    if(body.action==='arm_away')for(const area of areas){const ready=this.security.readiness(area,'away');allowed(area.mode==='disarmed'&&!area.targetMode,'Disarm '+area.name+' before arming it again');allowed(ready.ready,'Area not ready: '+area.name);}
+    const results=this.s.transaction(()=>{
+      if(body.action==='disarm'){const current=this.freshUser(actor.id),assigned=this.areaIds(current);if(!hasPermission(current,'controlSecurity')||areaIds.some(id=>!assigned.includes(id)))throw new KeypadError('PIN is invalid or does not permit the selected areas',403);}
+      return areaIds.map(id=>this.security.command(id,body.action,{reason:'Local kiosk'},actor?.username||'Local kiosk'));
+    });return {ok:true,action:body.action,areaIds,areas:results};
+  }
   command(sessionUser,input){
     const body=keys(input,['action','areaIds','all','pin']),session=this.freshUser(sessionUser.id);allowed(hasPermission(session,'viewSecurity'),'Security access is required',403);allowed(['arm_away','disarm'].includes(body.action),'Choose Arm Away or Disarm');
     allowed(body.all===undefined||typeof body.all==='boolean','All areas must be on or off');allowed(!(body.all===true&&body.areaIds!==undefined),'Choose selected areas or all areas');

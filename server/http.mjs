@@ -9,9 +9,10 @@ import {Sessions} from './sessions.mjs';
 import {Accounts,permissionKeys,hasPermission} from './accounts.mjs';
 import {SecurityEngine} from './security.mjs';
 import {Keypad,KeypadError} from './keypad.mjs';
+import {Kiosk} from './kiosk.mjs';
 
 const previewUser={id:'local-preview',username:'admin',displayName:'Local preview',role:'admin',enabled:true};
-const adminChanges=new Set(['/api/users','/api/users/update','/api/users/reset-password','/api/users/revoke-sessions','/api/users/keypad']);
+const adminChanges=new Set(['/api/users','/api/users/update','/api/users/reset-password','/api/users/revoke-sessions','/api/users/keypad','/api/kiosk/settings']);
 const routeFeatures=new Map([['/api/thresholds','manageThresholds'],['/api/device','manageDevices'],['/api/networks','manageBrokers'],['/api/email','manageEmail'],['/api/push/settings','manageNotifications'],...['retire','restore','delete-history','link','unlink'].map(action=>['/api/devices/'+action,'manageDevices']),['/api/alarms/acknowledge','acknowledge'],['/api/alarms/process','acknowledge'],['/api/shunts','manageShunts'],['/api/shunts/cancel','manageShunts']]);
 for(const route of ['areas','zones','schedules','actions','remove-area','remove-zone','remove-schedule','remove-action','areas/delete','zones/delete','schedules/delete','actions/delete'])routeFeatures.set('/api/security/'+route,'manageSecurity');
 for(const route of ['command','bypass','clear-bypass','zones/bypass','zones/clear-bypass'])routeFeatures.set('/api/security/'+route,'controlSecurity');
@@ -20,10 +21,12 @@ routeFeatures.set('/api/keypad/command','viewSecurity');
 const personalChanges=new Set(['/api/logout','/api/account/password','/api/account/keypad','/api/push/subscribe','/api/push/remove','/api/push/test']);
 const permissionsFor=user=>({...Object.fromEntries(permissionKeys.map(key=>[key,hasPermission(user,key)])),configure:['manageBrokers','manageThresholds','manageEmail','manageNotifications'].some(key=>hasPermission(user,key)),manageUsers:user.role==='admin',operateAlarms:hasPermission(user,'acknowledge')});
 
-export function createApp(engine,{collectors=null,push=null,security=null,securityActions=null,keypad=null,password='',host='127.0.0.1',publicHost='',dist=path.resolve('dist')}={}){
+export function createApp(engine,{collectors=null,push=null,security=null,securityActions=null,keypad=null,kiosk=null,password='',host='127.0.0.1',publicHost='',dist=path.resolve('dist')}={}){
   const accounts=new Accounts(engine.s,{password});
   security=security||new SecurityEngine(engine.s,{demo:engine.demo,clock:()=>engine.now(),timezone:engine.timezone});
   keypad=keypad||new Keypad(engine.s,security,accounts,{clock:()=>engine.now()});
+  const allowedHosts=(origin=engine.s.get('web')?.publicOrigin||'')=>new Set(['127.0.0.1','localhost','[::1]',host,...String(publicHost).split(',').map(x=>x.trim()),...(origin?[new URL(origin).hostname]:[])].filter(Boolean));
+  kiosk=kiosk||new Kiosk(keypad,{recognizesOrigin:origin=>allowedHosts().has(new URL(origin).hostname),clock:()=>engine.now()});
   if(!['127.0.0.1','localhost','::1'].includes(host)&&!accounts.active())throw Error('Set APP_PASSWORD to at least 12 characters before LAN hosting');
   push=push||new PushService(engine);
   const sessions=new Sessions(engine.s,accounts),attempts=new Map();
@@ -32,11 +35,23 @@ export function createApp(engine,{collectors=null,push=null,security=null,securi
     try{
       const url=new URL(req.url,'http://'+req.headers.host),route=url.pathname;
       const configuredOrigin=engine.s.get('web')?.publicOrigin||'';
-      const allowed=new Set(['127.0.0.1','localhost','[::1]',host,...String(publicHost).split(',').map(x=>x.trim()),...(configuredOrigin?[new URL(configuredOrigin).hostname]:[])].filter(Boolean));
+      const allowed=allowedHosts(configuredOrigin);
       const secureCookie=!!req.socket.encrypted||!!configuredOrigin&&new URL('https://'+req.headers.host).origin===configuredOrigin;
       if(!allowed.has(url.hostname))return json(res,403,{error:'Unrecognised host'});
       res.setHeader('X-Frame-Options','DENY');res.setHeader('Referrer-Policy','same-origin');res.setHeader('Content-Security-Policy',"default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
       if(route==='/api/health')return json(res,200,{status:'ready',mode:engine.demo?'simulation':'live',mqttPublications:securityActions?.stats?.().mqttPublications||0});
+      const kioskPage=['/kiosk','/kiosk/'].includes(route),kioskGet=req.method==='GET'&&route==='/api/kiosk/state',kioskPost=req.method==='POST'&&route==='/api/kiosk/command';
+      if(kioskPage||kioskGet||kioskPost){
+        if(req.url.split('?')[0]!==route)return json(res,403,{error:'Use the exact local kiosk address'});
+        const config=kiosk.gate(req,{post:kioskPost,rate:true});
+        if(kioskPage&&req.method!=='GET')return json(res,405,{error:'Method not allowed'});
+        if(kioskPost){
+          let size=0,parts=[];for await(const chunk of req){size+=chunk.length;if(size>4096)return json(res,413,{error:'Request is too large'});parts.push(chunk);}let input;try{input=JSON.parse(Buffer.concat(parts).toString());}catch{return json(res,400,{error:'Invalid JSON'});}
+          const fresh=kiosk.gate(req,{post:true});return json(res,200,kiosk.command(input,fresh));
+        }
+        if(route==='/api/kiosk/state')return json(res,200,kiosk.state(config));
+        const file=path.join(dist,'index.html');if(!fs.existsSync(file))return json(res,503,{error:'Build the frontend first'});res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});return fs.createReadStream(file).pipe(res);
+      }
       if(req.method!=='GET'&&req.headers.origin&&new URL(req.headers.origin).host!==req.headers.host)return json(res,403,{error:'Cross-origin changes are not allowed'});
       let body={};if(['POST','PUT','DELETE'].includes(req.method)){let size=0,parts=[];for await(const chunk of req){size+=chunk.length;if(size>65536)return json(res,413,{error:'Request is too large'});parts.push(chunk);}try{body=JSON.parse(Buffer.concat(parts).toString()||'{}');}catch{return json(res,400,{error:'Invalid JSON'});}if(!body||Array.isArray(body)||typeof body!=='object')return json(res,400,{error:'Expected a JSON object'});}
       const token=req.headers.cookie?.match(/(?:^|; )zh_session=([a-f0-9]{64})/)?.[1];
@@ -57,7 +72,7 @@ export function createApp(engine,{collectors=null,push=null,security=null,securi
       const user=accounts.active()?sessions.current(token):previewUser,admin=user?.role==='admin',actor=user?.username;
       if(route.startsWith('/api/')&&!user)return json(res,401,{error:'Sign in to Zigbee Health'});
       const permissions=user?permissionsFor(user):null;
-      const deniedRead=req.method==='GET'&&((['/api/users','/api/users/keypad'].includes(route)&&!admin)||(['/api/security','/api/keypad'].includes(route)&&!permissions.viewSecurity)||(route==='/api/network-log'&&!permissions.manageBrokers)||(['/api/report','/api/report.csv'].includes(route)&&!permissions.viewReports));
+      const deniedRead=req.method==='GET'&&((['/api/users','/api/users/keypad','/api/kiosk/settings'].includes(route)&&!admin)||(['/api/security','/api/keypad'].includes(route)&&!permissions.viewSecurity)||(route==='/api/network-log'&&!permissions.manageBrokers)||(['/api/report','/api/report.csv'].includes(route)&&!permissions.viewReports));
       const deniedWrite=req.method!=='GET'&&((adminChanges.has(route)&&!admin)||(routeFeatures.has(route)&&!hasPermission(user,routeFeatures.get(route)))||(!admin&&!routeFeatures.has(route)&&!personalChanges.has(route)));
       if(route.startsWith('/api/')&&(deniedRead||deniedWrite))return json(res,403,{error:'Your permissions do not permit this action'});
       if(route==='/api/logout'&&req.method==='POST'){sessions.revoke(token);res.setHeader('Set-Cookie','zh_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'+(secureCookie?'; Secure':''));return json(res,200,{ok:true});}
@@ -67,6 +82,8 @@ export function createApp(engine,{collectors=null,push=null,security=null,securi
       if(route==='/api/account/keypad'&&req.method==='POST')return json(res,200,keypad.saveOwn(user,body));
       if(route==='/api/users/keypad'&&req.method==='GET')return json(res,200,keypad.settings(url.searchParams.get('id'),{admin:true}));
       if(route==='/api/users/keypad'&&req.method==='POST')return json(res,200,keypad.saveUser(user,body));
+      if(route==='/api/kiosk/settings'&&req.method==='GET')return json(res,200,kiosk.settings(user));
+      if(route==='/api/kiosk/settings'&&req.method==='POST')return json(res,200,kiosk.configure(user,body));
       if(route==='/api/state'&&req.method==='GET'){
         const state=engine.snapshot();
         if(!permissions.manageBrokers)state.networks=state.networks.map(({id,label,mode,status,connected,enabled,bridgeState,subscriptionStatus})=>({id,label,mode,status,connected,enabled,bridgeState,subscriptionStatus}));
