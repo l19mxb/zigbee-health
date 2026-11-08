@@ -2,6 +2,7 @@ import React,{useEffect,useMemo,useRef,useState} from 'react';
 import {request} from './api.jsx';
 import {Field,Icon,Modal} from './ui.jsx';
 import {ThemeControl} from './theme.jsx';
+import {createKeypadAudio,keypadSoundKey,readKeypadSound,writeKeypadSound} from './keypad-audio.mjs';
 import './keypad.css';
 
 const count=(number,word)=>number+' '+word+(number===1?'':'s');
@@ -55,27 +56,32 @@ function ArmBypassReview({review,now,busy,onClose,onConfirm}){
     <div className="form-actions"><button type="button" disabled={busy} onClick={onClose}>Cancel</button><button className="primary" disabled={busy||!ready}>{busy?'Arming…':'Bypass and arm selected'}</button></div>
   </form></Modal>;
 }
-function PinPad({pin,onChange,disabled}){
+function PinPad({pin,onChange,disabled,onPhysicalKey}){
   return <div className="keypad-pin-controls"><div className="keypad-pin-entry">
-    <div className="keypad-pin-field"><input type="password" className="keypad-pin-input" aria-label="4-digit disarm PIN" aria-describedby="keypad-pin-help" inputMode="numeric" autoComplete="off" maxLength={4} pattern="[0-9]{4}" value={pin} disabled={disabled} onChange={event=>onChange(event.target.value.replace(/[^0-9]/g,'').slice(0,4))}/><span className="keypad-pin-dots" aria-hidden="true">{[0,1,2,3].map(index=><i key={index} className={index<pin.length?'filled':''}/>)}</span></div>
+    <div className="keypad-pin-field"><input type="password" className="keypad-pin-input" aria-label="4-digit disarm PIN" aria-describedby="keypad-pin-help" inputMode="numeric" autoComplete="off" maxLength={4} pattern="[0-9]{4}" value={pin} disabled={disabled} onChange={event=>onChange(event.target.value.replace(/[^0-9]/g,'').slice(0,4))} onKeyDown={event=>{if(disabled||!event.isTrusted||event.repeat||event.ctrlKey||event.metaKey||event.altKey)return;const start=event.currentTarget.selectionStart??pin.length,end=event.currentTarget.selectionEnd??start,selected=end>start;if(/^[0-9]$/.test(event.key)&&(pin.length<4||selected)||event.key==='Backspace'&&(selected||start>0)||event.key==='Delete'&&(selected||start<pin.length))onPhysicalKey?.();}}/><span className="keypad-pin-dots" aria-hidden="true">{[0,1,2,3].map(index=><i key={index} className={index<pin.length?'filled':''}/>)}</span></div>
     <p id="keypad-pin-help">Enter your 4-digit PIN to disarm</p><span className="sr-only" role="status" aria-live="polite">{pin.length} of 4 digits entered</span>
   </div><div className="keypad-digits" aria-label="PIN keypad">{[1,2,3,4,5,6,7,8,9].map(number=><button key={number} type="button" aria-label={'PIN digit '+number} disabled={disabled||pin.length===4} onClick={()=>onChange(pin+number)}>{number}</button>)}<button type="button" className="keypad-edit-digit" disabled={disabled||!pin} onClick={()=>onChange('')}>Clear</button><button type="button" aria-label="PIN digit 0" disabled={disabled||pin.length===4} onClick={()=>onChange(pin+'0')}>0</button><button type="button" className="keypad-edit-digit" aria-label="Backspace PIN digit" disabled={disabled||!pin} onClick={()=>onChange(pin.slice(0,-1))}>Backspace</button></div></div>;
 }
 
 export default function Keypad({onSecurity,kiosk=false,requestApi=request}){
+  const [soundEnabled,setSoundEnabled]=useState(()=>readKeypadSound()),[soundStatus,setSoundStatus]=useState({unlocked:false,supported:null});
   const [state,setState]=useState(null),[loading,setLoading]=useState(true),[connectionError,setConnectionError]=useState(''),[commandError,setCommandError]=useState(''),[message,setMessage]=useState(''),[busy,setBusy]=useState(false),[selection,setSelection]=useState(null),[pin,setPin]=useState(''),[carousel,setCarousel]=useState(0),[dialog,setDialog]=useState(null),[clock,setClock]=useState(Date.now()),[armReview,setArmReview]=useState(null);
-  const pending=useRef(null),received=useRef(Date.now()),context=useRef(null),latestState=useRef(null),reviewRef=useRef(null),reviewEpoch=useRef(0),reviewFlight=useRef(false);
+  const pending=useRef(null),received=useRef(Date.now()),context=useRef(null),latestState=useRef(null),reviewRef=useRef(null),reviewEpoch=useRef(0),reviewFlight=useRef(false),sound=useRef(null);
+  function feedback(method,value){try{sound.current?.[method](value);}catch{/* Audio never changes keypad operations. */}}
+  useEffect(()=>{const audio=createKeypadAudio({enabled:soundEnabled,visible:!document.hidden,onStatus:setSoundStatus});sound.current=audio;const visibility=()=>audio.setVisible(!document.hidden),hide=()=>audio.setVisible(false),sync=event=>{if(event.key===keypadSoundKey||event.key===null){const enabled=readKeypadSound();setSoundEnabled(enabled);audio.setEnabled(enabled);}};document.addEventListener('visibilitychange',visibility);window.addEventListener('pagehide',hide);window.addEventListener('pageshow',visibility);window.addEventListener('storage',sync);return()=>{audio.destroy();if(sound.current===audio)sound.current=null;document.removeEventListener('visibilitychange',visibility);window.removeEventListener('pagehide',hide);window.removeEventListener('pageshow',visibility);window.removeEventListener('storage',sync);};},[]);
+  function toggleSound(){const enabled=!soundEnabled;setSoundEnabled(enabled);writeKeypadSound(enabled);feedback('setEnabled',enabled);if(enabled)feedback('gesture',{pip:true});}
+  function buttonFeedback(event){const button=event.target.closest?.('button');if(event.isTrusted&&button&&!button.disabled&&!button.hasAttribute('data-keypad-sound-toggle'))feedback('gesture',{pip:true});}
   function discardReview(){reviewEpoch.current++;reviewRef.current=null;setArmReview(null);setDialog(null);setPin('');}
   async function refresh(){
     pending.current?.abort();const controller=new AbortController();pending.current=controller;
     try{
-      const value=await requestApi(kiosk?'kiosk/state':'keypad',undefined,controller.signal),nextContext=armingContext(value);latestState.current=value;
+      const value=await requestApi(kiosk?'kiosk/state':'keypad',undefined,controller.signal);if(controller.signal.aborted)return;const nextContext=armingContext(value);latestState.current=value;feedback('observe',value);
       if(context.current!==null&&context.current!==nextContext){const hadReview=!!reviewRef.current;discardReview();if(hadReview)setCommandError('Area settings or permissions changed. Review the zones again before arming.');}
       context.current=nextContext;
       if(reviewRef.current&&!reviewMatches(reviewRef.current,value)){discardReview();setCommandError('Zone conditions changed. Review the zones again before arming.');}
       received.current=Date.now();setState(value);setConnectionError('');return value;
     }
-    catch(error){if(error.name!=='AbortError'){setConnectionError(error.message);discardReview();if(kiosk){latestState.current=null;setState(null);}}}
+    catch(error){if(error.name!=='AbortError'){feedback('disconnect');setConnectionError(error.message);discardReview();if(kiosk){latestState.current=null;setState(null);}}}
     finally{if(!controller.signal.aborted)setLoading(false);}
   }
   useEffect(()=>{void refresh();const poll=setInterval(()=>void refresh(),3000),tick=setInterval(()=>setClock(Date.now()),1000);const clear=()=>{setPin('');if(reviewRef.current||reviewFlight.current)discardReview();},hidden=()=>{if(document.hidden)clear();};document.addEventListener('visibilitychange',hidden);window.addEventListener('pagehide',clear);return()=>{clearInterval(poll);clearInterval(tick);pending.current?.abort();document.removeEventListener('visibilitychange',hidden);window.removeEventListener('pagehide',clear);};},[]);
@@ -96,7 +102,7 @@ export default function Keypad({onSecurity,kiosk=false,requestApi=request}){
     if(!available)return;
     const body={action,...(all?{all:true}:{areaIds:selectedIds}),...(action==='disarm'?{pin}:{})};
     setBusy(true);setCommandError('');setMessage('');discardReview();
-    try{const result=await requestApi(kiosk?'kiosk/command':'keypad/command',body);setMessage((action==='disarm'?'Disarmed ':'Armed Away · ')+count(result.areaIds?.length||0,'area')+'.');await refresh();}
+    try{const result=await requestApi(kiosk?'kiosk/command':'keypad/command',body);pending.current?.abort();feedback('accepted',result);setMessage((action==='disarm'?'Disarmed ':'Armed Away · ')+count(result.areaIds?.length||0,'area')+'.');await refresh();}
     catch(error){setCommandError(error.message);if(kiosk&&error.status===403){setState(null);await refresh();}}
     finally{setBusy(false);}
   }
@@ -121,12 +127,12 @@ export default function Keypad({onSecurity,kiosk=false,requestApi=request}){
     if(reviewFlight.current||!available)return;
     if(!review||review.epoch!==reviewEpoch.current||now>=review.expiresAt||!reviewMatches(review,latestState.current)||typeof reason!=='string'||!reason.trim()||reason.trim().length>300||/[\u0000-\u001f\u007f]/.test(reason)){discardReview();setCommandError('Bypass review is no longer current. Review the zones again before arming.');return;}
     const body={action:'arm_away',areaIds:[...review.areaIds],bypass:{token:review.token,reason:reason.trim()}};reviewFlight.current=true;setBusy(true);discardReview();setCommandError('');setMessage('Applying the reviewed arm command…');
-    try{const result=await requestApi(kiosk?'kiosk/command':'keypad/command',body);setMessage('Armed Away · '+count(result.areaIds?.length||0,'area')+'. Cycle bypasses end when each area disarms.');await refresh();}
+    try{const result=await requestApi(kiosk?'kiosk/command':'keypad/command',body);pending.current?.abort();feedback('accepted',result);setMessage('Armed Away · '+count(result.areaIds?.length||0,'area')+'. Cycle bypasses end when each area disarms.');await refresh();}
     catch(error){discardReview();setMessage('');setCommandError(error.message+' Review the zones again before arming.');if(kiosk&&error.status===403){setState(null);await refresh();}}
     finally{reviewFlight.current=false;setBusy(false);}
   }
   const closeDialog=()=>{if(!busy){if(dialog==='bypass-arm')discardReview();else{setDialog(null);if(dialog==='disarm-all')setPin('');}}};
-  return <div className="keypad-workspace"><header className="keypad-header"><h1>Keypad</h1><div><ThemeControl/><time dateTime={new Date(now).toISOString()} aria-live="off"><strong>{formats.time.format(now)}</strong><span>{formats.date.format(now)}</span></time></div></header>
+  return <div className="keypad-workspace" onPointerDownCapture={event=>{if(event.isTrusted)feedback('gesture',{pip:false});}} onClickCapture={buttonFeedback}><header className="keypad-header"><h1>Keypad</h1><div><div className="keypad-sound-control"><button type="button" data-keypad-sound-toggle aria-pressed={soundEnabled} aria-label={soundEnabled?'Mute keypad sound':'Enable keypad sound'} onClick={toggleSound}>{soundEnabled?'Sound on':'Sound off'}</button><small>{!soundEnabled?'Muted':soundStatus.supported===false?'Audio unavailable':soundStatus.unlocked?'Enabled':'Tap a key to enable'}</small></div><ThemeControl/><time dateTime={new Date(now).toISOString()} aria-live="off"><strong>{formats.time.format(now)}</strong><span>{formats.date.format(now)}</span></time></div></header>
     {connectionError&&!kiosk?<div className="notice critical" role="alert"><strong>Keypad connection lost.</strong> Showing the last received state. Controls are unavailable until reconnection.<button onClick={refresh}>Reconnect</button></div>:null}
     {state?.message?<div className="notice" role="status">{state.message}</div>:null}
     {commandError?<div className="notice critical" role="alert">{commandError}</div>:null}{message?<div className="notice" role="status">{message}</div>:null}
@@ -136,7 +142,7 @@ export default function Keypad({onSecurity,kiosk=false,requestApi=request}){
         <CycleBypasses areas={selected}/>
         <div className="keypad-not-ready-carousel" aria-live="polite"><button className="icon-button" aria-label="Previous not ready zone" disabled={zones.length<2} onClick={()=>setCarousel((index+zones.length-1)%zones.length)}><Icon name="chevron" className="flip" size={25}/></button><div>{zone?<><strong>{zone.name}</strong><p>{zone.reason} · {index+1} of {zones.length} not ready</p>{selected.length>1?<small>{zone.areaNames.join(', ')}</small>:null}{zone.contextNames.length?<small>{zone.contextNames.join('; ')}</small>:null}</>:<><strong>{!selected.length?'Select an area':armReady?'All selected areas ready':selected.every(area=>area.mode!=='disarmed')?'Selected areas armed':'Area status'}</strong><p>{!selected.length?'Area selection is required for commands.':armReady?'Ready to arm Away':selected.some(area=>area.activeAlarmCount)?'Alarm memory must be acknowledged and reset in Security.':selected.some(area=>!area.enabled)?'One or more selected areas are disabled.':selected.some(area=>!area.zoneCount)?'Add an enabled zone before arming.':'Review the selected area status before arming.'}</p></>}</div><button className="icon-button" aria-label="Next not ready zone" disabled={zones.length<2} onClick={()=>setCarousel((index+1)%zones.length)}><Icon name="chevron" size={25}/></button></div>
         <button className="text-button keypad-all-zones" disabled={!zones.length} onClick={()=>setDialog('zones')}>Show all not ready zones</button>
-        <div className="keypad-entry-grid"><PinPad pin={pin} onChange={setPin} disabled={busy||!!connectionError||state.readOnly}/><div className="keypad-command-buttons"><button className="primary" disabled={!mayArm} title={!state.canArm?'Security control access is required':!armReady?'Select only disarmed, ready areas to arm':undefined} onClick={()=>void command('arm_away')}>Arm away</button>{showBypassArm?<button className="keypad-bypass-arm" disabled={!mayBypassArm} title="Review exact cycle exclusions before arming" onClick={()=>void prepareBypass()}>Bypass and arm…</button>:null}<button className="keypad-disarm-selected" disabled={!mayDisarm||!selected.length} onClick={()=>void command('disarm')}>Disarm selected</button><button className="keypad-disarm-all" disabled={!mayDisarm} onClick={()=>setDialog('disarm-all')}>{kiosk?'Disarm all permitted':'Disarm all assigned'}</button></div></div>
+        <div className="keypad-entry-grid"><PinPad pin={pin} onChange={setPin} disabled={busy||!!connectionError||state.readOnly} onPhysicalKey={()=>feedback('gesture',{pip:true})}/><div className="keypad-command-buttons"><button className="primary" disabled={!mayArm} title={!state.canArm?'Security control access is required':!armReady?'Select only disarmed, ready areas to arm':undefined} onClick={()=>void command('arm_away')}>Arm away</button>{showBypassArm?<button className="keypad-bypass-arm" disabled={!mayBypassArm} title="Review exact cycle exclusions before arming" onClick={()=>void prepareBypass()}>Bypass and arm…</button>:null}<button className="keypad-disarm-selected" disabled={!mayDisarm||!selected.length} onClick={()=>void command('disarm')}>Disarm selected</button><button className="keypad-disarm-all" disabled={!mayDisarm} onClick={()=>setDialog('disarm-all')}>{kiosk?'Disarm all permitted':'Disarm all assigned'}</button></div></div>
         <p className="keypad-footnote">{kiosk?'Local kiosk: arm selected ready areas without a PIN. Disarming requires an authorised PIN.':<>Arm away does not need a PIN.{!state.canArm?' Your session needs security control access to arm areas.':''}</>}</p>
       </section>
     </div>}
