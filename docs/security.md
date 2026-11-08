@@ -74,8 +74,8 @@ the multiple-area editor.
   a new sensor activation.
 
 Area configuration is changed while the area is disarmed. Removing an area also
-requires all areas sharing its zones to be disarmed. The panel is controlled
-by the signed-in account; it does not implement a separate numeric keypad PIN.
+requires all areas sharing its zones to be disarmed. The Security panel uses
+the signed-in account. The separate Keypad page uses the PIN flow described below.
 
 ## Schedules
 
@@ -183,6 +183,45 @@ An unfinished exit delay is cancelled and the area returns to Disarmed with an
 audit event. A restart during an entry delay retains the area as armed and
 latches the pending activation in alarm memory without replaying outputs. An
 operator should review that memory before resetting the area.
+
+## Tablet and phone keypad
+
+Open **Keypad** for a touch panel. On a landscape tablet the area list occupies
+one third of the panel and the keypad occupies the remainder. On a phone the
+area list appears above the keypad. The clock uses the dashboard timezone.
+
+Each area has a named state and an LED: steady green means Ready, flashing
+green means Not ready, steady yellow means Trouble and steady red means Armed.
+The status text remains available with reduced motion enabled. Select areas
+with their checkboxes. Browse blocking zones with the left/right buttons or
+open **Show all not ready zones** for the complete list.
+
+**Arm away** needs Security control permission in the signed-in account and
+does not need a PIN. Existing readiness checks apply. The keypad shows blocking
+zones and never silently bypasses them. A multi-area command either succeeds
+for the complete selection or leaves it unchanged.
+
+Set a personal four-digit PIN in **My account & app → Keypad PIN**, confirming
+your current dashboard password. An administrator can also use **Users →
+Keypad access** to assign permitted areas, replace a PIN or remove it.
+Administrators have all areas, including future areas; other users start with
+no assigned areas. A PIN is usable only while its owner is enabled and has
+Security control permission. Each saved PIN must be unique.
+
+The keypad requires a PIN for **Disarm selected** and **Disarm all assigned**.
+Disarming is attributed to the PIN owner. A signed-in Security viewer
+can display a wall keypad; the entered PIN supplies the authority to disarm.
+An explicit selection containing an unassigned area is rejected as a whole.
+The all-areas command means all areas permitted to that PIN owner.
+
+PINs are stored with salted password hashing and an installation-key-bound
+lookup. The API never returns a saved code. Failed PIN and current-password
+attempts are rate-limited in persistent storage. Entered keypad digits are
+cleared after a command, selection changes, inactivity or hiding the page.
+No PIN is created automatically during an upgrade.
+
+Existing Security panel controls retain their feature permissions. Weekly
+schedules continue to use their configured actions and do not prompt for a PIN.
 
 ## Permissions, storage and backup
 

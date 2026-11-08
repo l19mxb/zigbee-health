@@ -8,19 +8,22 @@ import {validateTopics} from './topic-log.mjs';
 import {Sessions} from './sessions.mjs';
 import {Accounts,permissionKeys,hasPermission} from './accounts.mjs';
 import {SecurityEngine} from './security.mjs';
+import {Keypad,KeypadError} from './keypad.mjs';
 
 const previewUser={id:'local-preview',username:'admin',displayName:'Local preview',role:'admin',enabled:true};
-const adminChanges=new Set(['/api/users','/api/users/update','/api/users/reset-password','/api/users/revoke-sessions']);
+const adminChanges=new Set(['/api/users','/api/users/update','/api/users/reset-password','/api/users/revoke-sessions','/api/users/keypad']);
 const routeFeatures=new Map([['/api/thresholds','manageThresholds'],['/api/device','manageDevices'],['/api/networks','manageBrokers'],['/api/email','manageEmail'],['/api/push/settings','manageNotifications'],...['retire','restore','delete-history','link','unlink'].map(action=>['/api/devices/'+action,'manageDevices']),['/api/alarms/acknowledge','acknowledge'],['/api/alarms/process','acknowledge'],['/api/shunts','manageShunts'],['/api/shunts/cancel','manageShunts']]);
 for(const route of ['areas','zones','schedules','actions','remove-area','remove-zone','remove-schedule','remove-action','areas/delete','zones/delete','schedules/delete','actions/delete'])routeFeatures.set('/api/security/'+route,'manageSecurity');
 for(const route of ['command','bypass','clear-bypass','zones/bypass','zones/clear-bypass'])routeFeatures.set('/api/security/'+route,'controlSecurity');
 routeFeatures.set('/api/security/push-test','viewSecurity');
-const personalChanges=new Set(['/api/logout','/api/account/password','/api/push/subscribe','/api/push/remove','/api/push/test']);
+routeFeatures.set('/api/keypad/command','viewSecurity');
+const personalChanges=new Set(['/api/logout','/api/account/password','/api/account/keypad','/api/push/subscribe','/api/push/remove','/api/push/test']);
 const permissionsFor=user=>({...Object.fromEntries(permissionKeys.map(key=>[key,hasPermission(user,key)])),configure:['manageBrokers','manageThresholds','manageEmail','manageNotifications'].some(key=>hasPermission(user,key)),manageUsers:user.role==='admin',operateAlarms:hasPermission(user,'acknowledge')});
 
-export function createApp(engine,{collectors=null,push=null,security=null,securityActions=null,password='',host='127.0.0.1',publicHost='',dist=path.resolve('dist')}={}){
+export function createApp(engine,{collectors=null,push=null,security=null,securityActions=null,keypad=null,password='',host='127.0.0.1',publicHost='',dist=path.resolve('dist')}={}){
   const accounts=new Accounts(engine.s,{password});
   security=security||new SecurityEngine(engine.s,{demo:engine.demo,clock:()=>engine.now(),timezone:engine.timezone});
+  keypad=keypad||new Keypad(engine.s,security,accounts,{clock:()=>engine.now()});
   if(!['127.0.0.1','localhost','::1'].includes(host)&&!accounts.active())throw Error('Set APP_PASSWORD to at least 12 characters before LAN hosting');
   push=push||new PushService(engine);
   const sessions=new Sessions(engine.s,accounts),attempts=new Map();
@@ -54,10 +57,16 @@ export function createApp(engine,{collectors=null,push=null,security=null,securi
       const user=accounts.active()?sessions.current(token):previewUser,admin=user?.role==='admin',actor=user?.username;
       if(route.startsWith('/api/')&&!user)return json(res,401,{error:'Sign in to Zigbee Health'});
       const permissions=user?permissionsFor(user):null;
-      const deniedRead=req.method==='GET'&&((route==='/api/users'&&!admin)||(route==='/api/security'&&!permissions.viewSecurity)||(route==='/api/network-log'&&!permissions.manageBrokers)||(['/api/report','/api/report.csv'].includes(route)&&!permissions.viewReports));
+      const deniedRead=req.method==='GET'&&((['/api/users','/api/users/keypad'].includes(route)&&!admin)||(['/api/security','/api/keypad'].includes(route)&&!permissions.viewSecurity)||(route==='/api/network-log'&&!permissions.manageBrokers)||(['/api/report','/api/report.csv'].includes(route)&&!permissions.viewReports));
       const deniedWrite=req.method!=='GET'&&((adminChanges.has(route)&&!admin)||(routeFeatures.has(route)&&!hasPermission(user,routeFeatures.get(route)))||(!admin&&!routeFeatures.has(route)&&!personalChanges.has(route)));
       if(route.startsWith('/api/')&&(deniedRead||deniedWrite))return json(res,403,{error:'Your permissions do not permit this action'});
       if(route==='/api/logout'&&req.method==='POST'){sessions.revoke(token);res.setHeader('Set-Cookie','zh_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'+(secureCookie?'; Secure':''));return json(res,200,{ok:true});}
+      if(route==='/api/keypad'&&req.method==='GET')return json(res,200,keypad.state(user));
+      if(route==='/api/keypad/command'&&req.method==='POST')return json(res,200,keypad.command(user,body));
+      if(route==='/api/account/keypad'&&req.method==='GET')return json(res,200,keypad.settings(user.id));
+      if(route==='/api/account/keypad'&&req.method==='POST')return json(res,200,keypad.saveOwn(user,body));
+      if(route==='/api/users/keypad'&&req.method==='GET')return json(res,200,keypad.settings(url.searchParams.get('id'),{admin:true}));
+      if(route==='/api/users/keypad'&&req.method==='POST')return json(res,200,keypad.saveUser(user,body));
       if(route==='/api/state'&&req.method==='GET'){
         const state=engine.snapshot();
         if(!permissions.manageBrokers)state.networks=state.networks.map(({id,label,mode,status,connected,enabled,bridgeState,subscriptionStatus})=>({id,label,mode,status,connected,enabled,bridgeState,subscriptionStatus}));
@@ -158,6 +167,6 @@ export function createApp(engine,{collectors=null,push=null,security=null,securi
       const relative=decodeURIComponent(route).replace(/^\/+/,'');const candidate=path.resolve(dist,relative||'index.html');if(candidate!==dist&&!candidate.startsWith(dist+path.sep))return json(res,403,{error:'Invalid path'});
       const file=fs.existsSync(candidate)&&fs.statSync(candidate).isFile()?candidate:path.join(dist,'index.html');if(!fs.existsSync(file))return json(res,503,{error:'Build the frontend first'});
       const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.woff2':'font/woff2','.png':'image/png','.webmanifest':'application/manifest+json'}[path.extname(file)]||'application/octet-stream';if(path.basename(file)==='sw.js')res.setHeader('Service-Worker-Allowed','/');res.writeHead(200,{'Content-Type':mime,'Cache-Control':path.extname(file)==='.html'||path.basename(file)==='sw.js'?'no-cache':'public,max-age=3600'});fs.createReadStream(file).pipe(res);
-    }catch(e){if(!res.headersSent)json(res,400,{error:e.message||'Request failed'});else res.end();}
+    }catch(e){if(!res.headersSent){if(e instanceof KeypadError&&e.retryAfter)res.setHeader('Retry-After',String(e.retryAfter));json(res,e instanceof KeypadError?e.statusCode:400,{error:e.message||'Request failed'});}else res.end();}
   });
 }

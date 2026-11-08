@@ -73,6 +73,10 @@ export class Accounts{
     this.s.run('UPDATE users SET last_login_at=? WHERE id=?',this.clock(),row.id);
     return this.get(row.id);
   }
+  verifyCurrentPassword(id,suppliedPassword){
+    const row=this.requireUser(id);
+    return verifyPassword(suppliedPassword,row.enabled?row:this.dummy)&&!!row.enabled;
+  }
   create(body,actor='System'){
     const name=username(body.username),label=displayName(body.displayName===undefined?name:body.displayName),access=role(body.role===undefined?'viewer':body.role),permissions=normalizePermissions(body.permissions,access);
     if(body.enabled!==undefined&&typeof body.enabled!=='boolean')throw Error('User enabled state must be on or off');

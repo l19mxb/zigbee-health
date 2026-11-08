@@ -46,13 +46,13 @@ export default function UserAdministration({currentUser,onChanged}){
       {error?<div className="notice critical" role="alert">{error}</div>:null}
       {message?<div className="notice" role="status">{message}</div>:null}
       {loading?<p className="empty" role="status">Loading users…</p>:table.filtered.length?<div className="table-scroll users-table"><table><thead><tr><SortHead column="username" table={table}>Username</SortHead><SortHead column="displayName" table={table}>Name</SortHead><SortHead column="accessLabel" table={table}>Access</SortHead><SortHead column="enabled" table={table}>Status</SortHead><SortHead column="lastLoginAt" table={table}>Last sign-in</SortHead><th>Actions</th></tr></thead><tbody>{table.rows.map(user=><tr key={user.id}>
-        <td><strong>{user.username}</strong>{currentUser?.id===user.id?<span className="row-subtitle">Your account</span>:null}</td><td>{user.displayName}</td><td><AccessSummary user={user}/></td><td><Badge tone={user.enabled?'healthy':'neutral'}>{user.enabled?'Enabled':'Disabled'}</Badge></td><td title={user.lastLoginAt?new Date(user.lastLoginAt).toISOString():undefined}>{date(user.lastLoginAt,true)}</td><td><div className="record-actions"><button aria-label={'Edit '+user.username} onClick={()=>setDialog({type:'edit',user})}>Edit</button><button aria-label={'Reset password for '+user.username} onClick={()=>setDialog({type:'reset',user})}>Reset password…</button><button aria-label={'Sign out '+user.username+' everywhere'} onClick={()=>setDialog({type:'revoke',user})}>Sign out everywhere…</button></div></td>
+        <td><strong>{user.username}</strong>{currentUser?.id===user.id?<span className="row-subtitle">Your account</span>:null}</td><td>{user.displayName}</td><td><AccessSummary user={user}/></td><td><Badge tone={user.enabled?'healthy':'neutral'}>{user.enabled?'Enabled':'Disabled'}</Badge></td><td title={user.lastLoginAt?new Date(user.lastLoginAt).toISOString():undefined}>{date(user.lastLoginAt,true)}</td><td><div className="record-actions"><button aria-label={'Edit '+user.username} onClick={()=>setDialog({type:'edit',user})}>Edit</button><button aria-label={'Manage keypad access for '+user.username} onClick={()=>setDialog({type:'keypad',user})}>Keypad access…</button><button aria-label={'Reset password for '+user.username} onClick={()=>setDialog({type:'reset',user})}>Reset password…</button><button aria-label={'Sign out '+user.username+' everywhere'} onClick={()=>setDialog({type:'revoke',user})}>Sign out everywhere…</button></div></td>
       </tr>)}</tbody></table></div>:<Empty>{table.search?'No users match this search.':'No user accounts are available.'}</Empty>}
       <Pagination total={table.filtered.length} {...table}/>
       <p className="small muted users-footnote">Disable an account to stop access while retaining its audit history. At least one enabled administrator must remain. Cloudflare Access separately controls who can reach the HTTPS app.</p>
     </section>
     <section className="panel config-panel users-role-panel" aria-label="Access presets"><header className="panel-heading"><h2>Access presets</h2></header><div className="users-role-grid">{roles.map(role=><div key={role}><h3>{roleLabel(role)}</h3><p className="muted">{roleDetails[role]}</p></div>)}</div><p className="small muted users-footnote">Presets are starting points for feature checkboxes. User administration is reserved for administrators and cannot be delegated separately. Everyone can manage their own password and notification preferences. Health push requires health monitor access; security push requires security view access and selection in an alert action.</p></section>
-    {dialog?<UserDialog key={dialog.type+(dialog.user?.id||'')} action={dialog} currentUser={currentUser} enabledAdmins={enabledAdmins} onClose={()=>setDialog(null)} onSave={save}/>:null}
+    {dialog?.type==='keypad'?<KeypadAccessDialog user={dialog.user} onClose={()=>setDialog(null)} onSave={save}/>:dialog?<UserDialog key={dialog.type+(dialog.user?.id||'')} action={dialog} currentUser={currentUser} enabledAdmins={enabledAdmins} onClose={()=>setDialog(null)} onSave={save}/>:null}
   </>;
 }
 
@@ -124,6 +124,87 @@ export function AccountPanel({currentUser,onChanged}){
     <header className="panel-heading"><h2>Your account</h2></header>
     <dl className="account-details"><div><dt>Username</dt><dd>{currentUser?.username}</dd></div><div><dt>Name</dt><dd>{currentUser?.displayName}</dd></div><div><dt>Access preset</dt><dd>{roleLabel(currentUser?.role)}</dd></div></dl>
     <section className="config-section account-feature-list" aria-label="Your feature access"><div className="user-features-heading"><h3>Your feature access</h3><AccessSummary user={currentUser}/></div>{userFeatures(currentUser).length?<ul>{features.filter(([key])=>userFeatures(currentUser).includes(key)).map(([key,label])=><li key={key}><Icon name="check" size={15}/>{label}</li>)}{currentUser?.role==='admin'?<li><Icon name="check" size={15}/>User administration</li>:null}</ul>:<p className="muted">No dashboard features are enabled for this account. Your own password and notification preferences remain available.</p>}</section>
+    {currentUser?.id&&currentUser.id!=='local-preview'?<OwnKeypadPin key={currentUser.id} currentUser={currentUser}/>:<section className="config-section own-keypad"><h3>Keypad PIN</h3><p className="muted">Set up authenticated user accounts to use keypad PINs.</p></section>}
     <section className="config-section"><h3>Change password</h3><p className="muted">Changing your password ends all your sign-ins, including remembered 30-day sign-ins.</p><form className="account-password-form" onSubmit={submit}><Field label="Current password" type="password" autoComplete="current-password" required maxLength={128} value={currentPassword} onChange={e=>setCurrentPassword(e.target.value)}/><Field label="New password" type="password" autoComplete="new-password" required minLength={12} maxLength={128} value={password} onChange={e=>setPassword(e.target.value)} hint="12–128 characters."/><Field label="Repeat new password" type="password" autoComplete="new-password" required minLength={12} maxLength={128} value={repeat} onChange={e=>setRepeat(e.target.value)}/>{error?<div className="notice critical" role="alert">{error}</div>:null}{message?<div className="notice" role="status">{message}</div>:null}<button className="primary" disabled={busy}>{busy?'Changing password…':'Change password'}</button></form></section>
   </section>;
+}
+
+function useKeypadStatus(route){
+  const [status,setStatus]=useState(null),[loading,setLoading]=useState(true),[error,setError]=useState('');
+  async function reload(signal){
+    setLoading(true);setError('');
+    try{const next=await request(route,undefined,signal);setStatus(next);return next;}
+    catch(e){if(e.name!=='AbortError')setError(e.message);return null;}
+    finally{if(!signal?.aborted)setLoading(false);}
+  }
+  useEffect(()=>{const controller=new AbortController();void reload(controller.signal);return()=>controller.abort();},[route]);
+  return {status,loading,error,reload};
+}
+
+function PinFields({pin,setPin,repeat,setRepeat,disabled=false}){
+  const digits=value=>value.replace(/[^0-9]/g,'').slice(0,4);
+  return <div className="keypad-pin-fields"><Field label="New 4-digit PIN" type="password" inputMode="numeric" autoComplete="new-password" pattern="[0-9]{4}" minLength={4} maxLength={4} required disabled={disabled} value={pin} onChange={e=>setPin(digits(e.target.value))} hint="Exactly four digits. The existing PIN is never displayed."/><Field label="Repeat new PIN" type="password" inputMode="numeric" autoComplete="new-password" pattern="[0-9]{4}" minLength={4} maxLength={4} required disabled={disabled} value={repeat} onChange={e=>setRepeat(digits(e.target.value))}/></div>;
+}
+
+function KeypadAreaList({status}){
+  if(status.allAreas)return <p className="small muted">This PIN can disarm all security areas, including areas added later. Administrator access cannot be restricted here.</p>;
+  return status.areas.length?<ul className="keypad-area-names">{status.areas.map(area=><li key={area.id}>{area.name}</li>)}</ul>:<p className="small muted">No security areas assigned. An administrator must assign areas before this PIN can disarm them.</p>;
+}
+
+function OwnKeypadPin({currentUser}){
+  const {status,loading,error,reload}=useKeypadStatus('account/keypad');
+  const [operation,setOperation]=useState(null),[currentPassword,setCurrentPassword]=useState(''),[pin,setPin]=useState(''),[repeat,setRepeat]=useState(''),[confirmed,setConfirmed]=useState(false),[busy,setBusy]=useState(false),[formError,setFormError]=useState(''),[message,setMessage]=useState('');
+  function clear(){setPin('');setRepeat('');setCurrentPassword('');setConfirmed(false);}
+  function choose(value){clear();setFormError('');setMessage('');setOperation(value);}
+  async function submit(event){
+    event.preventDefault();setFormError('');setMessage('');
+    if(operation==='set'&&(pin.length!==4||pin!==repeat)){setFormError('Enter the same four-digit PIN twice.');return;}
+    if(operation==='remove'&&!confirmed){setFormError('Confirm removal before continuing.');return;}
+    setBusy(true);
+    try{await request('account/keypad',{currentPassword,operation,...(operation==='set'?{pin}:{})});clear();setOperation(null);setMessage(operation==='set'?'Keypad PIN saved.':'Keypad PIN removed.');await reload();}
+    catch(e){clear();setFormError(e.message);}
+    finally{setBusy(false);}
+  }
+  return <section className="config-section own-keypad" aria-label="Your keypad PIN"><div className="user-features-heading"><h3>Keypad PIN</h3>{status?<Badge tone={status.pinSet?'healthy':'neutral'}>{status.pinSet?'PIN set':'No PIN set'}</Badge>:null}</div><p className="muted">Use your personal four-digit PIN on the security keypad. It is separate from your dashboard password.</p>
+    {loading?<p className="small muted user-keypad-loading" role="status">Loading keypad access…</p>:null}
+    {error?<div className="notice critical" role="alert">{error}<button type="button" onClick={()=>void reload()}>Retry</button></div>:null}
+    {status&&!loading?<><div className="keypad-own-areas"><h4>PIN disarm areas</h4><KeypadAreaList status={status}/></div>{!status.canControl?<div className="notice">This account does not currently have security control access. An administrator must enable that feature before you can set or use a keypad PIN.</div>:null}
+      {!operation?<div className="record-actions keypad-actions"><button type="button" disabled={busy||!status.canControl||!currentUser?.enabled} onClick={()=>choose('set')}>{status.pinSet?'Change keypad PIN':'Set keypad PIN'}</button>{status.pinSet?<button type="button" disabled={busy} onClick={()=>choose('remove')}>Remove keypad PIN…</button>:null}</div>:<form className="account-password-form keypad-own-form" onSubmit={submit}>
+        <h4>{operation==='set'?(status.pinSet?'Change keypad PIN':'Set keypad PIN'):'Remove keypad PIN'}</h4><Field label="Current password for PIN change" type="password" autoComplete="current-password" required disabled={busy} maxLength={128} value={currentPassword} onChange={e=>setCurrentPassword(e.target.value)}/>
+        {operation==='set'?<PinFields pin={pin} setPin={setPin} repeat={repeat} setRepeat={setRepeat} disabled={busy}/>:<><div className="notice warning">Removing your PIN prevents keypad disarming with this account until a new PIN is set.</div><label className="checkbox-field user-confirm"><input type="checkbox" checked={confirmed} disabled={busy} onChange={e=>setConfirmed(e.target.checked)}/>I confirm removal of my keypad PIN.</label></>}
+        {formError?<div className="notice critical" role="alert">{formError}</div>:null}<div className="form-actions"><button type="button" disabled={busy} onClick={()=>choose(null)}>Cancel</button><button className="primary" disabled={busy||!currentPassword||(operation==='set'?(pin.length!==4||pin!==repeat):!confirmed)}>{busy?'Saving…':operation==='set'?'Save keypad PIN':'Remove keypad PIN'}</button></div>
+      </form>}
+    </>:null}{message?<div className="notice" role="status">{message}</div>:null}
+  </section>;
+}
+
+function KeypadAccessDialog({user,onClose,onSave}){
+  const {status,loading,error,reload}=useKeypadStatus('users/keypad?id='+encodeURIComponent(user.id));
+  const [areaIds,setAreaIds]=useState([]),[operation,setOperation]=useState('save'),[pin,setPin]=useState(''),[repeat,setRepeat]=useState(''),[confirmed,setConfirmed]=useState(false),[busy,setBusy]=useState(false),[formError,setFormError]=useState('');
+  useEffect(()=>{if(status)setAreaIds([...status.areaIds]);},[status]);
+  const areasChanged=status&&!status.allAreas&&!sameFeatures(areaIds,status.areaIds),changed=operation!=='save'||areasChanged;
+  function close(){if(!busy){setPin('');setRepeat('');onClose();}}
+  function choose(value){setOperation(value);setPin('');setRepeat('');setConfirmed(false);setFormError('');}
+  function toggleArea(id,checked){setAreaIds(value=>checked?[...new Set([...value,id])]:value.filter(areaId=>areaId!==id));setConfirmed(false);}
+  async function submit(event){
+    event.preventDefault();setFormError('');
+    if(operation==='set'&&(pin.length!==4||pin!==repeat)){setFormError('Enter the same four-digit PIN twice.');return;}
+    if(!confirmed){setFormError('Confirm the keypad access change before continuing.');return;}
+    setBusy(true);
+    try{await onSave('users/keypad',{id:user.id,operation,...(!status.allAreas?{areaIds}:{}),...(operation==='set'?{pin}:{})},operation==='remove'?'Keypad PIN removed and access saved.':'Keypad access saved.');setPin('');setRepeat('');}
+    catch(e){setPin('');setRepeat('');setConfirmed(false);setFormError(e.message);}
+    finally{setBusy(false);}
+  }
+  return <Modal title="Keypad access" onClose={close}><form className="user-form keypad-access-form" onSubmit={submit}><p className="user-dialog-identity"><strong>{user.displayName}</strong><span className="muted">{user.username}</span></p>
+    {loading?<p role="status" className="small muted">Loading keypad access…</p>:null}{error?<div className="notice critical" role="alert">{error}<button type="button" onClick={()=>void reload()}>Retry</button></div>:null}
+    {status&&!loading?<><div className="keypad-status-row"><span>Keypad PIN</span><Badge tone={status.pinSet?'healthy':'neutral'}>{status.pinSet?'PIN set':'No PIN set'}</Badge></div><fieldset className="user-keypad-areas" disabled={status.allAreas||busy}><legend>PIN disarm areas</legend>{status.allAreas?<KeypadAreaList status={status}/>:status.areas.length?status.areas.map(area=><label className="checkbox-field" key={area.id}><input type="checkbox" checked={areaIds.includes(area.id)} onChange={e=>toggleArea(area.id,e.target.checked)}/>{area.name}</label>):<p className="small muted">No security areas exist yet. Add an area in Security setup before assigning keypad access.</p>}</fieldset>
+      {!status.allAreas?<p className="small muted keypad-area-hint">Only the selected areas can be disarmed with this person’s PIN. No selection permits no PIN disarming.</p>:null}
+      {!status.enabled||!status.canControl?<div className="notice">This account {status.enabled?'does not have security control access':'is disabled'}. You can prepare its PIN and areas, but the PIN cannot be used until the account is enabled and security control is permitted.</div>:null}
+      <Field label="PIN action"><select value={operation} disabled={busy} onChange={e=>choose(e.target.value)}><option value="save">{status.pinSet?'Keep current PIN':'Leave PIN unset'}</option><option value="set">{status.pinSet?'Set a replacement PIN':'Set a PIN'}</option>{status.pinSet?<option value="remove">Remove PIN</option>:null}</select></Field>
+      {operation==='set'?<PinFields pin={pin} setPin={setPin} repeat={repeat} setRepeat={setRepeat} disabled={busy}/>:null}
+      {operation==='remove'?<div className="notice warning">Remove this person’s PIN. They will not be able to disarm from a keypad until a new PIN is set.</div>:null}
+      {operation==='set'?<p className="small muted keypad-pin-hint">Each person needs a unique PIN. The saved code cannot be viewed later. Share a replacement privately.</p>:null}
+      {changed?<label className="checkbox-field user-confirm"><input type="checkbox" checked={confirmed} disabled={busy} onChange={e=>setConfirmed(e.target.checked)}/>I confirm these keypad access changes.</label>:null}
+    </>:null}{formError?<div className="notice critical" role="alert">{formError}</div>:null}<div className="form-actions"><button type="button" disabled={busy} onClick={close}>Cancel</button><button className="primary" disabled={busy||loading||!status||!changed||!confirmed||(operation==='set'&&(pin.length!==4||pin!==repeat))}>{busy?'Saving…':'Save keypad access'}</button></div>
+  </form></Modal>;
 }

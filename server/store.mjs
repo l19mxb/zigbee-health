@@ -62,7 +62,15 @@ export class Store {
   device(id){return parse(this.one('SELECT json FROM devices WHERE id=?',id)?.json);}
   saveDevice(d){this.run('INSERT INTO devices VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,json=excluded.json',d.id,d.networkId,d.ieee,d.name,JSON.stringify(d));}
   event(type,message,{deviceId=null,networkId=null,actor='System',incidentId=null,at=Date.now()}={}){this.run('INSERT INTO events(at,device_id,network_id,type,message,actor,incident_id) VALUES(?,?,?,?,?,?,?)',at,deviceId,networkId,type,message,actor,incidentId);}
-  transaction(fn){this.db.exec('BEGIN IMMEDIATE');try{const result=fn();this.db.exec('COMMIT');return result;}catch(e){this.db.exec('ROLLBACK');throw e;}}
+  transaction(fn){
+    // Nested operations use savepoints, allowing a multi-area keypad command to
+    // commit or roll back as one unit without weakening each command's own guard.
+    const depth=this.transactionDepth||0,name='zh_nested_'+depth;
+    this.db.exec(depth?'SAVEPOINT '+name:'BEGIN IMMEDIATE');this.transactionDepth=depth+1;
+    try{const result=fn();this.db.exec(depth?'RELEASE SAVEPOINT '+name:'COMMIT');return result;}
+    catch(error){if(depth){this.db.exec('ROLLBACK TO SAVEPOINT '+name);this.db.exec('RELEASE SAVEPOINT '+name);}else this.db.exec('ROLLBACK');throw error;}
+    finally{this.transactionDepth=depth;}
+  }
   seal(value){if(!value)return '';const iv=crypto.randomBytes(12),c=crypto.createCipheriv('aes-256-gcm',this.encryptionKey,iv);const encrypted=Buffer.concat([c.update(value,'utf8'),c.final()]);return Buffer.concat([iv,c.getAuthTag(),encrypted]).toString('base64');}
   unseal(value){if(!value)return '';const b=Buffer.from(value,'base64'),c=crypto.createDecipheriv('aes-256-gcm',this.encryptionKey,b.subarray(0,12));c.setAuthTag(b.subarray(12,28));return Buffer.concat([c.update(b.subarray(28)),c.final()]).toString('utf8');}
   close(){this.db.close();}

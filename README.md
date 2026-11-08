@@ -15,7 +15,7 @@ to a broker.
   conditions. Global thresholds, device overrides, persistence and hysteresis.
 - Timed or indefinite device/category/network shunts. Actual health and history
   remain visible. Expiry rearms a continuing fault once.
-- Device reports, battery/LQI charts, event timelines and CSV export.
+- Searchable device report picker, battery/LQI charts, event timelines and CSV export.
 - Retirement/restoration, confirmed history deletion and links for moved or
   replacement devices.
 - SMTP fault/recovery notifications with duplicate suppression and delivery history.
@@ -26,6 +26,8 @@ to a broker.
 - Light, Dark and System colour themes, remembered in each browser.
 - Residential-style security panel with areas, device zones, Home/Away modes,
   entry/exit delays, bypasses, latched alarm memory and weekly schedules.
+- Responsive tablet keypad with area LEDs, not-ready zone browsing, code-free
+  Away arming and personal four-digit PIN disarming.
 - Search devices by name, network or Zigbee identity when configuring a zone;
   assign a zone to one or several areas with independent area arming and alarms.
 - Optional security MQTT messages, SMTP alerts and browser push to selected
