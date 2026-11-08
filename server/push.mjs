@@ -78,7 +78,7 @@ export class PushService{
   }
   payload(i,kind){
     if(kind==='test')return {title:'Zigbee Health',body:'Browser notifications are set up.',tag:'zigbee-health-test',url:'/',alarmId:null};
-    const detail=this.settings().includeDeviceNames?i.description:labels[i.category]+(kind==='recovery'?' restored.':' detected.')+' Open the alarm viewer to review.';
+    const detail=this.settings().includeDeviceNames?i.description:labels[i.category]+(kind==='recovery'?' restored.':' detected.')+' Open the health monitor to review.';
     return {title:'Zigbee Health'+(kind==='recovery'?' · Restored':''),body:detail.slice(0,240),tag:'zh-'+i.id,url:'/?alarm='+encodeURIComponent(i.id),alarmId:i.id};
   }
   deliver(){

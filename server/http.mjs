@@ -78,12 +78,12 @@ export function createApp(engine,{collectors=null,push=null,password='',host='12
       if(route==='/api/push'&&req.method==='GET')return json(res,200,push.status(accounts.active()?user.id:null,admin));
       if(route==='/api/push/settings'&&req.method==='POST'){push.configure(body,actor);return json(res,200,{ok:true});}
       if(route==='/api/push/subscribe'&&req.method==='POST'){
-        if(!permissions.viewHealth)return json(res,403,{error:'Alarm viewer access is required for browser notifications'});
+        if(!permissions.viewHealth)return json(res,403,{error:'Health monitor access is required for browser notifications'});
         const origin=engine.s.get('web')?.publicOrigin;if(!origin||req.headers.origin!==origin)throw Error('Enable browser notifications from the configured HTTPS app address');
         return json(res,201,push.subscribe(body.subscription,body.label,actor,accounts.active()?user.id:null));
       }
       if(route==='/api/push/remove'&&req.method==='POST'){push.remove(body.id,actor,accounts.active()?user.id:null,admin);return json(res,200,{ok:true});}
-      if(route==='/api/push/test'&&req.method==='POST'){if(!permissions.viewHealth)return json(res,403,{error:'Alarm viewer access is required for browser notifications'});return json(res,200,await push.test(body.id,accounts.active()?user.id:null,admin));}
+      if(route==='/api/push/test'&&req.method==='POST'){if(!permissions.viewHealth)return json(res,403,{error:'Health monitor access is required for browser notifications'});return json(res,200,await push.test(body.id,accounts.active()?user.id:null,admin));}
       if(route==='/api/network-log'&&req.method==='GET'){
         const id=url.searchParams.get('network');if(!engine.s.network(id))throw Error('Network not found');
         return json(res,200,{entries:collectors?.logs?.read(id)||[],limit:200,persistent:false});

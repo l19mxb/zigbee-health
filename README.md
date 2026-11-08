@@ -83,7 +83,7 @@ access; do not expose the unencrypted administrative interface to the internet.
 
 On first account setup, the app creates username **`admin`** with the configured
 `APP_PASSWORD` (or Compose's `ZIGBEE_HEALTH_PASSWORD`). When upgrading from the
-shared-password version to v0.4.1, use `admin` and the existing dashboard password.
+shared-password version to v0.4.2, use `admin` and the existing dashboard password.
 Existing identity-less sessions are signed out during migration. The database,
 device history and notification configuration remain in the same data directory.
 
@@ -112,10 +112,10 @@ The user list and account page show the enabled features and their count.
 
 | Feature checkbox | Access granted |
 | --- | --- |
-| Alarm viewer | Device health and the alarm stack |
+| Health monitor | Device health and the alarm stack |
 | History & reports | Event history, device trend reports and report export |
-| Acknowledge / process alarms | Acknowledge and process alarms; also enables Alarm viewer |
-| Apply / cancel shunts | Apply and cancel shunts; also enables Alarm viewer |
+| Acknowledge / process alarms | Acknowledge and process alarms; also enables Health monitor |
+| Apply / cancel shunts | Apply and cancel shunts; also enables Health monitor |
 | Device records & settings | Device lifecycle, record links, rooms and overrides |
 | Brokers & live topic log | Broker configuration and the live topic log |
 | Thresholds & retention | Global health thresholds and retention settings |
@@ -128,10 +128,10 @@ Administrator checkboxes are checked and locked. At least one enabled
 administrator must remain, so the last one cannot be disabled or demoted.
 
 Everyone can manage their own password and notification preferences, even with no
-dashboard features enabled. Receiving alarm push requires **Alarm viewer**.
+dashboard features enabled. Receiving alarm push requires **Health monitor**.
 Turning that checkbox off also removes acknowledgement/shunt access and disables
 the account's existing alarm push subscriptions and pending push messages.
-Restoring Alarm viewer does not restart those subscriptions: the person must
+Restoring Health monitor does not restart those subscriptions: the person must
 enable notifications again from their browser.
 
 Server-side permission checks apply even if a client manually submits a request.
@@ -167,12 +167,13 @@ Proxy sessions have their own duration and can require a separate login.
 
 Choose **Light**, **Dark** or **System** from the theme control. System follows
 the operating system's colour preference. The selected preference is stored in
-that browser and applies to the login page, alarm viewer, reports and dialogs;
+that browser and applies to the login page, health monitor, reports and dialogs;
 changing it does not change another user's browser or the monitoring settings.
 
-Security-device areas, arming/disarming schedules and MQTT-triggered security
-actions are planned separately. This release does not implement them and the
-collector continues to publish no device commands.
+The Health monitor covers device and broker health. A separate security module,
+security-device areas, arming/disarming schedules and MQTT-triggered security
+actions are planned for a future release. This release does not implement them,
+and the collector continues to publish no device commands.
 
 ## Device identity and lifecycle
 
@@ -242,7 +243,7 @@ entry to preserve its history.
 Android Chrome is the primary target. Web Push requires a secure HTTPS origin,
 a service worker and an explicit permission grant. The LAN HTTP address remains
 usable as a dashboard but cannot enrol normal browser push subscriptions.
-The signed-in account also needs the **Alarm viewer** feature to enrol and receive
+The signed-in account also needs the **Health monitor** feature to enrol and receive
 alarm push. Managing shared app-address/global-push settings requires that
 separate feature checkbox or Administrator access.
 
@@ -260,7 +261,7 @@ separate feature checkbox or Administrator access.
 
 The push service receives an encrypted payload; the service worker displays it
 without fetching an authenticated API in the background. Tapping it opens the
-alarm viewer, where an expired app/proxy login may require signing in again.
+health monitor, where an expired app/proxy login may require signing in again.
 It never acknowledges or shunts an alarm. Proxy access rules must allow the
 authenticated browser to register the service worker and load its assets; verify
 your actual proxy/phone combination after setup.

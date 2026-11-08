@@ -19,7 +19,7 @@ self.addEventListener('push',event=>event.waitUntil((async()=>{
   let data={};try{data=event.data?.json()||{};}catch{}
   let target;try{target=new URL(typeof data.url==='string'?data.url:'/',self.location.origin);}catch{target=new URL('/',self.location.origin);}
   await self.registration.showNotification(String(data.title||'Zigbee Health').slice(0,100),{
-    body:String(data.body||'Open the alarm viewer to review.').slice(0,300),icon:'/icon-192.png',badge:'/icon-192.png',
+    body:String(data.body||'Open the health monitor to review.').slice(0,300),icon:'/icon-192.png',badge:'/icon-192.png',
     tag:String(data.tag||'zigbee-health').slice(0,100),data:{url:target.origin===self.location.origin?target.pathname+target.search:'/'},
   });
 })()));
