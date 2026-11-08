@@ -190,11 +190,18 @@ Open **Keypad** for a touch panel. On a landscape tablet the area list occupies
 one third of the panel and the keypad occupies the remainder. On a phone the
 area list appears above the keypad. The clock uses the dashboard timezone.
 
-Each area has a named state and an LED: steady green means Ready, flashing
-green means Not ready, steady yellow means Trouble and steady red means Armed.
-The status text remains available with reduced motion enabled. Select areas
-with their checkboxes. Browse blocking zones with the left/right buttons or
-open **Show all not ready zones** for the complete list.
+Each area has three independent indicators. The green Ready LED is steady
+when its enabled zones are normal. The same green LED flashes when any enabled
+zone is open, active, unknown or in trouble, and while the area has alarm memory.
+The yellow Trouble LED stays on for zone trouble, and the red Armed LED stays
+on while the area is armed or arming. They can be lit together. Disabled areas
+or areas without enabled zones show an unavailable state instead of Ready.
+
+Select areas with their checkboxes. Browse zone issues with the left/right
+buttons or open **Show all not ready zones** for the complete list. The display
+includes bypassed and Home-excluded zones; their labels explain why arming can
+still be permitted. Arming continues to use the existing protection rules.
+Named states remain visible with reduced motion enabled.
 
 **Arm away** needs Security control permission in the signed-in account and
 does not need a PIN. Existing readiness checks apply. The keypad shows blocking

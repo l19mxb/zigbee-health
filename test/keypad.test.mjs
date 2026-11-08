@@ -147,8 +147,55 @@ test('corrupt credential records fail closed with a generic disarm rejection',()
   const f=fixture();try{f.pin();f.s.run('UPDATE security_keypad_pins SET salt=?,hash=?','bad','bad');assert.throws(()=>f.keypad.command(f.wall,{action:'disarm',all:true,pin:'0471'}),/does not permit/);}finally{f.close();}
 });
 
+test('keypad display reports an open Home-excluded zone without changing Home protection or Away readiness',()=>{
+  const f=fixture();try{
+    f.security.saveZone({id:f.zones[0].id,homeBypass:true},'Fixture');
+    f.security.saveZone({id:f.zones[1].id,areaIds:[f.one.id,f.two.id]},'Fixture');
+    f.security.command(f.one.id,'arm_home',{},'Fixture');f.security.ingest('one',{contact:false});
+    const area=f.keypad.state(f.wall).areas.find(area=>area.id===f.one.id),{zoneIssues,zoneTroubleCount,canArmAway,...original}=area;
+    assert.deepEqual(original,f.security.areaView(f.security.area(f.one.id)));assert.equal(area.mode,'home');assert.equal(area.status,'armed');assert.equal(area.readyHome,true);assert.equal(area.readyAway,false);assert.deepEqual(area.blockingZones,[]);assert.equal(area.zoneCount,2);assert.equal(canArmAway,false);assert.equal(zoneTroubleCount,0);
+    assert.deepEqual(zoneIssues,[{id:f.zones[0].id,name:'House contact',status:'active',trouble:null,bypassed:false,homeExcluded:true}]);assert.equal(f.security.activeIncidents().length,0);
+  }finally{f.close();}
+});
+
+test('keypad display distinguishes unknown and offline Home-excluded detectors even when manually bypassed',()=>{
+  const f=fixture();try{
+    f.security.saveZone({id:f.zones[0].id,homeBypass:true},'Fixture');f.security.saveZone({id:f.zones[1].id,areaIds:[f.one.id,f.two.id]},'Fixture');f.security.command(f.one.id,'arm_home',{},'Fixture');
+    f.security.readings.delete('one');let area=f.keypad.state(f.wall).areas.find(area=>area.id===f.one.id);assert.equal(area.readyHome,true);assert.equal(area.troubleCount,0);assert.equal(area.zoneTroubleCount,1);assert.equal(area.zoneIssues[0].status,'unknown');assert.equal(area.zoneIssues[0].homeExcluded,true);assert.match(area.zoneIssues[0].trouble,/fresh sensor report/);
+    f.s.saveDevice({...f.s.device('one'),availability:'offline'});f.security.bypassZone(f.zones[0].id,{durationMin:null,reason:'Synthetic maintenance'},'Fixture');area=f.keypad.state(f.wall).areas.find(area=>area.id===f.one.id);
+    assert.equal(area.readyHome,true);assert.equal(area.readyAway,true);assert.equal(area.troubleCount,0);assert.equal(area.zoneTroubleCount,1);assert.deepEqual(area.zoneIssues,[{id:f.zones[0].id,name:'House contact',status:'trouble',trouble:'Device offline',bypassed:true,homeExcluded:true}]);
+  }finally{f.close();}
+});
+
+test('a manually bypassed open detector remains visible while existing Arm Away commands remain permitted',()=>{
+  const f=fixture();try{
+    f.security.saveZone({id:f.zones[1].id,areaIds:[f.one.id,f.two.id]},'Fixture');f.security.bypassZone(f.zones[0].id,{durationMin:null,reason:'Synthetic maintenance'},'Fixture');f.security.ingest('one',{contact:false});
+    const before=f.security.readiness(f.security.area(f.one.id),'away'),area=f.keypad.state(f.operator).areas.find(area=>area.id===f.one.id);assert.equal(before.ready,true);assert.equal(area.readyAway,true);assert.equal(area.canArmAway,true);assert.deepEqual(area.blockingZones,[]);assert.equal(area.zoneTroubleCount,0);assert.equal(area.zoneIssues[0].status,'active');assert.equal(area.zoneIssues[0].bypassed,true);assert.equal(area.zoneIssues[0].homeExcluded,false);assert.deepEqual(f.security.readiness(f.security.area(f.one.id),'away'),before);
+    assert.equal(f.keypad.command(f.operator,{action:'arm_away',areaIds:[f.one.id]}).ok,true);assert.equal(f.security.area(f.one.id).mode,'away');assert.equal(f.security.activeIncidents().length,0);
+    f.security.ingest('one',{contact:true});assert.deepEqual(f.keypad.state(f.wall).areas.find(area=>area.id===f.one.id).zoneIssues,[]);
+  }finally{f.close();}
+});
+
+test('disabled zones, empty areas and entirely bypassed areas do not invent detector issues',()=>{
+  const f=fixture();try{
+    f.security.saveZone({id:f.zones[0].id,enabled:false},'Fixture');f.s.saveDevice({...f.s.device('one'),availability:'offline'});f.security.saveArea({id:f.one.id,enabled:false},'Fixture');const empty=f.security.saveArea({name:'Empty area'},'Fixture');
+    f.security.bypassZone(f.zones[1].id,{durationMin:null,reason:'Synthetic maintenance'},'Fixture');const state=f.keypad.state(f.wall),disabled=state.areas.find(area=>area.id===f.one.id),noZones=state.areas.find(area=>area.id===empty.id),bypassed=state.areas.find(area=>area.id===f.two.id);
+    for(const area of [disabled,noZones,bypassed]){assert.deepEqual(area.zoneIssues,[]);assert.equal(area.zoneTroubleCount,0);assert.equal(area.readyAway,false);}
+    assert.equal(disabled.enabled,false);assert.equal(disabled.zoneCount,0);assert.equal(noZones.zoneCount,0);assert.equal(bypassed.zoneCount,1);assert.equal(bypassed.includedCount,0);
+  }finally{f.close();}
+});
+
+test('display polling is read-only and keeps disarmed latched alarm memory independent of restored zone conditions',()=>{
+  const f=fixture();try{
+    f.security.command(f.one.id,'arm_away',{},'Fixture');f.security.ingest('one',{contact:false});assert.equal(f.security.activeIncidents(f.one.id).length,1);f.security.command(f.one.id,'disarm',{},'Fixture');f.security.ingest('one',{contact:true});
+    const changes=f.s.one('SELECT total_changes() n').n,before=f.s.all('SELECT * FROM security_incidents'),readings=JSON.stringify([...f.security.readings].map(([id,record])=>[id,{...record,values:[...record.values]}]));f.s.db.exec('PRAGMA query_only = ON');
+    for(let poll=0;poll<2;poll++){const area=f.keypad.state(f.wall).areas.find(area=>area.id===f.one.id);assert.equal(area.mode,'disarmed');assert.equal(area.status,'alarm');assert.equal(area.activeAlarmCount,1);assert.equal(area.readyAway,false);assert.deepEqual(area.zoneIssues,[]);assert.equal(area.zoneTroubleCount,0);}
+    assert.equal(f.s.one('SELECT total_changes() n').n,changes);assert.deepEqual(f.s.all('SELECT * FROM security_incidents'),before);assert.equal(JSON.stringify([...f.security.readings].map(([id,record])=>[id,{...record,values:[...record.values]}])),readings);
+  }finally{f.close();}
+});
+
 test('unauthenticated simulation keypad data is display-only and cannot set or use PINs',()=>{
-  const s=new Store();try{const health=new Engine(s,{demo:true}),accounts=new Accounts(s),security=new SecurityEngine(s,{demo:true}),keypad=new Keypad(s,security,accounts),preview={id:'local-preview',role:'admin',enabled:true};security.saveArea({name:'Demo area'},'Fixture');const state=keypad.state(preview);assert.equal(state.readOnly,true);assert.equal(state.canArm,false);assert.equal(state.ownPin.configured,false);assert.equal(state.areas.length,1);assert.throws(()=>keypad.command(preview,{action:'arm_away',all:true}),/Security access/);assert.equal(s.one('SELECT count(*) n FROM security_keypad_pins').n,0);}finally{s.close();}
+  const s=new Store();try{const health=new Engine(s,{demo:true}),accounts=new Accounts(s),security=new SecurityEngine(s,{demo:true}),keypad=new Keypad(s,security,accounts),preview={id:'local-preview',role:'admin',enabled:true};security.saveArea({name:'Demo area'},'Fixture');const state=keypad.state(preview);assert.equal(state.readOnly,true);assert.equal(state.canArm,false);assert.equal(state.ownPin.configured,false);assert.equal(state.areas.length,1);assert.deepEqual(state.areas[0].zoneIssues,[]);assert.equal(state.areas[0].zoneTroubleCount,0);assert.throws(()=>keypad.command(preview,{action:'arm_away',all:true}),/Security access/);assert.equal(s.one('SELECT count(*) n FROM security_keypad_pins').n,0);}finally{s.close();}
 });
 
 test('HTTP keypad routes preserve authentication, ownership, admin controls, origin checks and generic throttled errors',async()=>{

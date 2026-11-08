@@ -35,11 +35,22 @@ export class Keypad{
     const canControl=hasPermission(user,'controlSecurity'),areaIds=admin||hasPermission(user,'viewSecurity')?this.areaIds(user):[],visible=admin?this.security.areas():this.security.areas().filter(area=>areaIds.includes(area.id));
     return {userId:user.id,pinSet:!!this.s.one('SELECT user_id FROM security_keypad_pins WHERE user_id=?',user.id),enabled:user.enabled,canControl,allAreas:user.role==='admin',areaIds,areas:visible.map(({id,name})=>({id,name}))};
   }
+  displayArea(area){
+    const zoneIssues=this.security.zones().filter(zone=>zone.enabled&&this.security.zoneInArea(zone,area.id)).flatMap(zone=>{
+      const view=this.security.zoneView(zone,area,'away');
+      if(view.active!==true&&!view.trouble&&view.known)return [];
+      // Bypass affects protection/readiness, but must not hide a detector's raw
+      // condition from the keypad lights. This copy is never saved.
+      const raw=view.bypassed?this.security.zoneView({...zone,bypassAt:null,bypassUntil:null},area,'away'):view;
+      return [{id:zone.id,name:zone.name,status:raw.status,trouble:view.trouble,bypassed:view.bypassed,homeExcluded:(area.targetMode||area.mode)==='home'&&zone.homeBypass}];
+    });
+    return {...this.security.areaView(area),zoneIssues,zoneTroubleCount:zoneIssues.filter(zone=>zone.status==='trouble'||zone.status==='unknown').length};
+  }
   state(sessionUser){
-    if(this.security.demo&&!this.accounts.active())return {now:this.now(),timezone:this.security.timezone,areas:this.security.areas().map(area=>({...this.security.areaView(area),canArmAway:false})),canArm:false,readOnly:true,ownPin:{configured:false,areaIds:[],allAreas:false},message:'Sign in with an authenticated account to use the keypad.'};
+    if(this.security.demo&&!this.accounts.active())return {now:this.now(),timezone:this.security.timezone,areas:this.security.areas().map(area=>({...this.displayArea(area),canArmAway:false})),canArm:false,readOnly:true,ownPin:{configured:false,areaIds:[],allAreas:false},message:'Sign in with an authenticated account to use the keypad.'};
     const user=this.freshUser(sessionUser.id);allowed(hasPermission(user,'viewSecurity'),'Security access is required',403);
     const settings=this.settings(user.id);
-    return {now:this.now(),timezone:this.security.timezone,areas:this.security.areas().map(area=>{const view=this.security.areaView(area);return {...view,canArmAway:!!(hasPermission(user,'controlSecurity')&&area.mode==='disarmed'&&!area.targetMode&&view.readyAway)};}),canArm:hasPermission(user,'controlSecurity'),readOnly:false,ownPin:{configured:settings.pinSet,areaIds:settings.areaIds,allAreas:settings.allAreas}};
+    return {now:this.now(),timezone:this.security.timezone,areas:this.security.areas().map(area=>{const view=this.displayArea(area);return {...view,canArmAway:!!(hasPermission(user,'controlSecurity')&&area.mode==='disarmed'&&!area.targetMode&&view.readyAway)};}),canArm:hasPermission(user,'controlSecurity'),readOnly:false,ownPin:{configured:settings.pinSet,areaIds:settings.areaIds,allAreas:settings.allAreas}};
   }
   checkThrottle(scope){
     const row=this.s.one('SELECT blocked_until,last_at FROM security_keypad_throttle WHERE scope=?',scope),now=this.now();
