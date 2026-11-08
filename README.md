@@ -28,6 +28,8 @@ to a broker.
   entry/exit delays, bypasses, latched alarm memory and weekly schedules.
 - Responsive tablet keypad with area LEDs, not-ready zone browsing, code-free
   Away arming and personal four-digit PIN disarming.
+- Explicit review and confirmation to bypass blocking zones for one area's
+  current arm cycle, with assigned-area PIN access for disarming.
 - Optional local kiosk page without a dashboard login, restricted to a direct
   local IP address and administrator-selected networks and areas.
 - Search devices by name, network or Zigbee identity when configuring a zone;

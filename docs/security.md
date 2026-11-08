@@ -38,9 +38,11 @@ disarm or acknowledge Garage. Each area keeps its own entry/exit delays,
 Home/Away mode, schedules, alarm memory and alert actions.
 
 The zone's name, trigger condition, Entry/Instant type, reporting timeout,
-enabled state and Home-mode exclusion are shared settings. A bypass also applies
-to the zone in **every assigned area**; the panel warns about that scope before
-applying it. Home exclusion follows each area's own mode, so a zone can be
+enabled state and Home-mode exclusion are shared settings. A manual timed or
+indefinite bypass in the Security panel also applies to the zone in **every
+assigned area**; the panel warns about that scope before applying it. The
+keypad's **Bypass and arm** confirmation instead applies only to the selected
+area's current arm cycle. Home exclusion follows each area's own mode, so a zone can be
 excluded in a Home-armed area while still protecting an Away-armed area.
 
 Disarm every linked area before changing or removing a shared zone. Adding it
@@ -207,6 +209,24 @@ Named states remain visible with reduced motion enabled.
 does not need a PIN. Existing readiness checks apply. The keypad shows blocking
 zones and never silently bypasses them. A multi-area command either succeeds
 for the complete selection or leaves it unchanged.
+
+If selected areas have open, unknown or unavailable zones, **Bypass and arm**
+opens a review of the exact zones to be left unprotected in each area. Enter a
+reason and confirm the warning before arming. Each area must retain at least
+one enabled, protected zone. Disabled areas, areas without zones and unresolved
+alarm memory cannot be bypassed through this flow. The confirmation expires
+after two minutes; changed conditions or access require a fresh review.
+
+These bypasses last until that area is disarmed, even if a sensor returns to
+normal. The keypad keeps their names visible. They survive a restart of a fully
+armed area, but are cleared if an unfinished exit delay is cancelled. New faults
+during the exit delay are not automatically bypassed. A detector shared with
+another area continues to protect that other area. The green Ready LED still
+flashes for the underlying open, trouble or alarm condition.
+
+An anonymous local kiosk offers this flow only when an administrator separately
+enables **Allow bypass and arm** in its settings. Scheduled arming never chooses
+bypasses automatically.
 
 Set a personal four-digit PIN in **My account & app → Keypad PIN**, confirming
 your current dashboard password. An administrator can also use **Users →

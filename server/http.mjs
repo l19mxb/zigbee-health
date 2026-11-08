@@ -107,7 +107,7 @@ export function createApp(engine,{collectors=null,push=null,security=null,securi
         if(!permissions.manageSecurity){state.actions=[];state.schedules=[];state.deliveries=(state.deliveries||[]).map(({id,incidentId,status,kind,error,createdAt,finishedAt})=>({id,incidentId,status,kind,error,createdAt,finishedAt}));delete state.securityPushRecipients;delete state.securityPushSettings;}
         return json(res,200,{...state,currentUser:user,permissions});
       }
-      if(route==='/api/security/command'&&req.method==='POST')return json(res,200,{ok:true,area:security.command(body.areaId,body.action,{reason:body.reason},actor)});
+      if(route==='/api/security/command'&&req.method==='POST'){if(Object.keys(body).some(key=>!['areaId','action','reason','actor'].includes(key)))throw new KeypadError('Use the Keypad bypass preview before bypass arming');return json(res,200,{ok:true,area:security.command(body.areaId,body.action,{reason:body.reason},actor)});}
       if(route==='/api/security/push-test'&&req.method==='POST')return json(res,200,await push.securityTest(body.subscriptionId,accounts.active()?user.id:null));
       if(['/api/security/bypass','/api/security/zones/bypass'].includes(route)&&req.method==='POST')return json(res,200,{ok:true,zone:security.bypassZone(body.id,{durationMin:body.durationMin,reason:body.reason},actor)});
       if(['/api/security/clear-bypass','/api/security/zones/clear-bypass'].includes(route)&&req.method==='POST')return json(res,200,{ok:true,zone:security.clearBypass(body.id,actor)});

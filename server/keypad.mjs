@@ -18,6 +18,7 @@ export class Keypad{
       CREATE TABLE IF NOT EXISTS security_keypad_throttle(scope TEXT PRIMARY KEY,failures INTEGER NOT NULL,blocked_until INTEGER NOT NULL,last_at INTEGER NOT NULL);`);
     this.dummySalt=this.mac('dummy-salt').slice(0,32);
     this.dummyHash=this.derive('dummy-not-a-pin',this.dummySalt);
+    this.armPreviews=new Map();this.previewEpoch=crypto.randomBytes(16).toString('hex');
   }
   now(){return this.clock();}
   mac(value){return crypto.createHmac('sha256',this.s.encryptionKey).update('zigbee-keypad-v1\0'+value).digest('hex');}
@@ -41,16 +42,40 @@ export class Keypad{
       if(view.active!==true&&!view.trouble&&view.known)return [];
       // Bypass affects protection/readiness, but must not hide a detector's raw
       // condition from the keypad lights. This copy is never saved.
-      const raw=view.bypassed?this.security.zoneView({...zone,bypassAt:null,bypassUntil:null},area,'away'):view;
-      return [{id:zone.id,name:zone.name,status:raw.status,trouble:view.trouble,bypassed:view.bypassed,homeExcluded:(area.targetMode||area.mode)==='home'&&zone.homeBypass}];
+      const raw=view.bypassed?this.security.zoneView({...zone,bypassAt:null,bypassUntil:null},{...area,cycleBypass:null},'away'):view;
+      return [{id:zone.id,name:zone.name,status:raw.status,trouble:view.trouble,bypassed:view.bypassed,manualBypassed:view.manualBypassed,cycleBypassed:view.cycleBypassed,homeExcluded:(area.targetMode||area.mode)==='home'&&zone.homeBypass}];
     });
     return {...this.security.areaView(area),zoneIssues,zoneTroubleCount:zoneIssues.filter(zone=>zone.status==='trouble'||zone.status==='unknown').length};
   }
   state(sessionUser){
-    if(this.security.demo&&!this.accounts.active())return {now:this.now(),timezone:this.security.timezone,areas:this.security.areas().map(area=>({...this.displayArea(area),canArmAway:false})),canArm:false,readOnly:true,ownPin:{configured:false,areaIds:[],allAreas:false},message:'Sign in with an authenticated account to use the keypad.'};
+    if(this.security.demo&&!this.accounts.active())return {now:this.now(),timezone:this.security.timezone,areas:this.security.areas().map(area=>({...this.displayArea(area),canArmAway:false})),canArm:false,canBypassArm:false,armingRevision:this.armingRevision(this.security.areas().map(area=>area.id),'demo'),readOnly:true,ownPin:{configured:false,areaIds:[],allAreas:false},message:'Sign in with an authenticated account to use the keypad.'};
     const user=this.freshUser(sessionUser.id);allowed(hasPermission(user,'viewSecurity'),'Security access is required',403);
     const settings=this.settings(user.id);
-    return {now:this.now(),timezone:this.security.timezone,areas:this.security.areas().map(area=>{const view=this.displayArea(area);return {...view,canArmAway:!!(hasPermission(user,'controlSecurity')&&area.mode==='disarmed'&&!area.targetMode&&view.readyAway)};}),canArm:hasPermission(user,'controlSecurity'),readOnly:false,ownPin:{configured:settings.pinSet,areaIds:settings.areaIds,allAreas:settings.allAreas}};
+    return {now:this.now(),timezone:this.security.timezone,areas:this.security.areas().map(area=>{const view=this.displayArea(area);return {...view,canArmAway:!!(hasPermission(user,'controlSecurity')&&area.mode==='disarmed'&&!area.targetMode&&view.readyAway)};}),canArm:hasPermission(user,'controlSecurity'),canBypassArm:hasPermission(user,'controlSecurity'),armingRevision:this.armingRevision(this.security.areas().map(area=>area.id),this.userBinding(user)),readOnly:false,ownPin:{configured:settings.pinSet,areaIds:settings.areaIds,allAreas:settings.allAreas}};
+  }
+  userBinding(user){return 'user:'+user.id+':'+user.authVersion;}
+  armingConfig(areaIds){const ids=new Set(areaIds);return {areas:[...areaIds].sort().map(id=>this.security.requireArea(id)),zones:this.security.zones().filter(zone=>zone.areaIds.some(id=>ids.has(id))),schedules:this.security.schedules().filter(schedule=>ids.has(schedule.areaId))};}
+  armingRevision(areaIds,binding){return this.mac('arming-revision\0'+this.previewEpoch+'\0'+binding+'\0'+JSON.stringify(this.armingConfig(areaIds)));}
+  bypassPlan(areaIds){
+    const areas=[...areaIds].sort().map(id=>{
+      const area=this.security.requireArea(id),ready=this.security.readiness(area,'away');allowed(area.enabled,'This security area is disabled');allowed(area.mode==='disarmed'&&!area.targetMode,'Disarm '+area.name+' before arming it again');allowed(!ready.activeAlarmCount,'Reset alarm memory before arming this area');allowed(ready.zoneCount>0,'Add an enabled zone before arming this area');
+      const protectedZoneCount=ready.includedCount-ready.blockingZones.length;allowed(protectedZoneCount>0,'At least one included, ready zone must remain protected in '+area.name);
+      return {id:area.id,name:area.name,blockingZones:ready.blockingZones.map(({id,name,status,trouble})=>({id,name,status,trouble})),protectedZoneCount};
+    });
+    const config=this.armingConfig(areaIds),conditions=config.zones.map(zone=>({id:zone.id,areas:zone.areaIds.filter(id=>areaIds.includes(id)).map(id=>{const view=this.security.zoneView(zone,this.security.requireArea(id),'away');return {id,known:view.known,active:view.active,status:view.status,trouble:view.trouble};})}));
+    return {areas,signature:this.mac('arming-plan\0'+JSON.stringify({config,conditions}))};
+  }
+  prepareBypass(areaIds,binding){
+    const plan=this.bypassPlan(areaIds);allowed(plan.areas.some(area=>area.blockingZones.length),'These areas are ready; use Arm away');
+    for(const [token,value] of this.armPreviews)if(value.expiresAt<=this.now()||value.binding===binding)this.armPreviews.delete(token);allowed(this.armPreviews.size<256,'Too many arming previews. Try again later.',429);
+    const token=crypto.randomBytes(32).toString('hex'),expiresAt=this.now()+120000;this.armPreviews.set(token,{binding,areaIds:[...areaIds].sort(),signature:plan.signature,expiresAt});return {ok:true,action:'prepare_arm_away',preview:{token,expiresAt,areas:plan.areas}};
+  }
+  confirmBypass(areaIds,bypass,binding,actor,checkCaller){
+    const body=keys(bypass,['token','reason']);allowed(typeof body.token==='string'&&/^[a-f0-9]{64}$/.test(body.token),'Review the bypass list again');
+    const preview=this.armPreviews.get(body.token);allowed(preview&&preview.binding===binding,'Arming preview expired or changed; review the bypass list again');this.armPreviews.delete(body.token);
+    allowed(typeof body.reason==='string'&&body.reason.trim().length>0&&body.reason.trim().length<=300&&!/[\u0000-\u001f\u007f]/.test(body.reason),'Enter a bypass reason (1–300 characters)');
+    allowed(preview.expiresAt>this.now()&&JSON.stringify(preview.areaIds)===JSON.stringify([...areaIds].sort()),'Arming preview expired or changed; review the bypass list again');
+    const results=this.s.transaction(()=>{checkCaller();const plan=this.bypassPlan(areaIds);allowed(plan.signature===preview.signature,'Conditions changed; review the bypass list again');return plan.areas.map(area=>this.security.armWithCycleBypass(area.id,area.blockingZones.map(zone=>zone.id),body.reason.trim(),actor));});return {ok:true,action:'arm_away',areaIds:results.map(area=>area.id),areas:results};
   }
   checkThrottle(scope){
     const row=this.s.one('SELECT blocked_until,last_at FROM security_keypad_throttle WHERE scope=?',scope),now=this.now();
@@ -99,17 +124,20 @@ export class Keypad{
     const matched=crypto.timingSafeEqual(Buffer.from(candidate,'hex'),Buffer.from(expected,'hex'));
     return matched&&row?this.freshUser(row.user_id):null;
   }
-  kioskCommand(input,scope){
-    const body=keys(input,['action','areaIds','all','pin']),scopeIds=this.validateAreas(scope),scopeSet=new Set(scopeIds);
-    allowed(['arm_away','disarm'].includes(body.action),'Choose Arm Away or Disarm');allowed(body.all===undefined||typeof body.all==='boolean','All areas must be on or off');allowed(!(body.all===true&&body.areaIds!==undefined),'Choose selected areas or all areas');
+  kioskCommand(input,scope,{allowBypassArming=false,binding='',checkBypass=()=>{}}={}){
+    const body=keys(input,['action','areaIds','all','pin','bypass']),scopeIds=this.validateAreas(scope),scopeSet=new Set(scopeIds);
+    allowed(['arm_away','prepare_arm_away','disarm'].includes(body.action),'Choose Arm Away or Disarm');allowed(body.all===undefined||typeof body.all==='boolean','All areas must be on or off');allowed(!(body.all===true&&body.areaIds!==undefined),'Choose selected areas or all areas');
     const explicit=body.all===true?null:this.validateAreas(body.areaIds);if(explicit)allowed(explicit.length>0,'Select at least one area');let actor=null,areaIds=explicit;
-    if(body.action==='arm_away'){
+    if(body.action!=='disarm'){
       allowed(body.pin===undefined,'Arming does not require a PIN');if(body.all===true)areaIds=scopeIds;allowed(areaIds.every(id=>scopeSet.has(id)),'Choose only areas available on this kiosk',403);
     }else{
+      allowed(body.bypass===undefined,'Disarming does not accept a bypass');
       this.checkThrottle('pin');actor=this.pinUser(body.pin);if(!hasPermission(actor,'controlSecurity'))return this.rejected({username:'Local kiosk'});
       const assigned=this.areaIds(actor);if(body.all===true)areaIds=assigned.filter(id=>scopeSet.has(id));if(!areaIds?.length||areaIds.some(id=>!scopeSet.has(id)||!assigned.includes(id)))return this.rejected({username:'Local kiosk'});
     }
-    allowed(areaIds?.length>0,'No areas are available');const areas=areaIds.map(id=>this.security.requireArea(id));
+    allowed(areaIds?.length>0,'No areas are available');
+    if(body.action==='prepare_arm_away'||body.bypass!==undefined){allowed(allowBypassArming&&typeof binding==='string'&&binding.startsWith('kiosk:'),'Bypass arming is not enabled for this kiosk',403);if(body.action==='prepare_arm_away'){allowed(body.bypass===undefined,'Request a new bypass preview');checkBypass(areaIds);return this.prepareBypass(areaIds,binding);}return this.confirmBypass(areaIds,body.bypass,binding,'Local kiosk',()=>{allowed(allowBypassArming&&areaIds.every(id=>scopeSet.has(id)),'Kiosk permissions changed',403);checkBypass(areaIds);});}
+    const areas=areaIds.map(id=>this.security.requireArea(id));
     if(body.action==='arm_away')for(const area of areas){const ready=this.security.readiness(area,'away');allowed(area.mode==='disarmed'&&!area.targetMode,'Disarm '+area.name+' before arming it again');allowed(ready.ready,'Area not ready: '+area.name);}
     const results=this.s.transaction(()=>{
       if(body.action==='disarm'){const current=this.freshUser(actor.id),assigned=this.areaIds(current);if(!hasPermission(current,'controlSecurity')||areaIds.some(id=>!assigned.includes(id)))throw new KeypadError('PIN is invalid or does not permit the selected areas',403);}
@@ -117,19 +145,22 @@ export class Keypad{
     });return {ok:true,action:body.action,areaIds,areas:results};
   }
   command(sessionUser,input){
-    const body=keys(input,['action','areaIds','all','pin']),session=this.freshUser(sessionUser.id);allowed(hasPermission(session,'viewSecurity'),'Security access is required',403);allowed(['arm_away','disarm'].includes(body.action),'Choose Arm Away or Disarm');
+    const body=keys(input,['action','areaIds','all','pin','bypass']),session=this.freshUser(sessionUser.id);allowed(hasPermission(session,'viewSecurity'),'Security access is required',403);allowed(['arm_away','prepare_arm_away','disarm'].includes(body.action),'Choose Arm Away or Disarm');
     allowed(body.all===undefined||typeof body.all==='boolean','All areas must be on or off');allowed(!(body.all===true&&body.areaIds!==undefined),'Choose selected areas or all areas');
     const explicit=body.all===true?null:this.validateAreas(body.areaIds);if(explicit)allowed(explicit.length>0,'Select at least one area');
     let actor=session,areaIds=explicit;
-    if(body.action==='arm_away'){
+    if(body.action!=='disarm'){
       allowed(hasPermission(session,'controlSecurity'),'Security control access is required',403);allowed(body.pin===undefined,'Arming does not require a PIN');if(body.all===true)areaIds=this.security.areas().map(area=>area.id);
     }else{
+      allowed(body.bypass===undefined,'Disarming does not accept a bypass');
       this.checkThrottle('pin');actor=this.pinUser(body.pin);
       if(!hasPermission(actor,'controlSecurity'))return this.rejected(session);
       const authorized=this.areaIds(actor);if(body.all===true)areaIds=authorized;
       if(!areaIds?.length||areaIds.some(id=>!authorized.includes(id)))return this.rejected(session);
     }
     allowed(areaIds?.length>0,'No areas are available');
+    if(body.action==='prepare_arm_away'){allowed(body.bypass===undefined,'Request a new bypass preview');return this.prepareBypass(areaIds,this.userBinding(session));}
+    if(body.bypass!==undefined)return this.confirmBypass(areaIds,body.bypass,this.userBinding(session),session.username,()=>{const current=this.freshUser(session.id);allowed(hasPermission(current,'controlSecurity')&&this.userBinding(current)===this.userBinding(session),'Your session permissions changed',403);});
     const areas=areaIds.map(id=>this.security.requireArea(id));
     if(body.action==='arm_away')for(const area of areas){const ready=this.security.readiness(area,'away');allowed(area.mode==='disarmed'&&!area.targetMode,'Disarm '+area.name+' before arming it again');allowed(ready.ready,'Area not ready: '+area.name);}
     const results=this.s.transaction(()=>{

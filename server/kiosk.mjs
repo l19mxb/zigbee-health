@@ -1,7 +1,7 @@
 import net from 'node:net';
 import {KeypadError} from './keypad.mjs';
 
-const defaults=()=>({enabled:false,origin:'',cidrs:[],allAreas:true,areaIds:[]});
+const defaults=()=>({enabled:false,origin:'',cidrs:[],allAreas:true,areaIds:[],allowBypassArming:false});
 const requireValue=(ok,message,status=400)=>{if(!ok)throw new KeypadError(message,status);};
 const ipv4=value=>net.isIP(value)===4?value.split('.').reduce((total,part)=>(total*256+Number(part))>>>0,0):null;
 const mask=bits=>bits===0?0:(0xffffffff<<(32-bits))>>>0;
@@ -25,10 +25,11 @@ export function kioskCidr(value){
 
 /** Explicitly enabled direct-LAN surface. No session or account is created. */
 export class Kiosk{
-  constructor(keypad,{recognizesOrigin=()=>false,clock=()=>Date.now()}={}){this.keypad=keypad;this.s=keypad.s;this.security=keypad.security;this.accounts=keypad.accounts;this.recognizesOrigin=recognizesOrigin;this.clock=clock;this.rates=new Map();}
+  constructor(keypad,{recognizesOrigin=()=>false,clock=()=>Date.now()}={}){this.keypad=keypad;this.s=keypad.s;this.security=keypad.security;this.accounts=keypad.accounts;this.recognizesOrigin=recognizesOrigin;this.clock=clock;this.rates=new Map();this.generation=0;}
   validate(input){
-    requireValue(input&&typeof input==='object'&&!Array.isArray(input)&&Object.keys(input).every(key=>['enabled','origin','cidrs','allAreas','areaIds'].includes(key)),'Provide kiosk settings');
+    requireValue(input&&typeof input==='object'&&!Array.isArray(input)&&Object.keys(input).every(key=>['enabled','origin','cidrs','allAreas','areaIds','allowBypassArming'].includes(key)),'Provide kiosk settings');
     requireValue(typeof input.enabled==='boolean'&&typeof input.allAreas==='boolean','Kiosk enabled and all areas must be on or off');
+    requireValue(input.allowBypassArming===undefined||typeof input.allowBypassArming==='boolean','Bypass arming must be on or off');
     requireValue(typeof input.origin==='string'&&input.origin.length<=100,'Use an exact local HTTP or HTTPS origin');
     if(input.origin){let url;try{url=new URL(input.origin);}catch{throw new KeypadError('Use an exact local HTTP or HTTPS origin');}
       requireValue(['http:','https:'].includes(url.protocol)&&privateAddress(url.hostname)&&url.origin===input.origin&&url.pathname==='/'&&!url.search&&!url.hash&&!url.username&&!url.password,'Use an exact private IPv4 or loopback HTTP or HTTPS origin');
@@ -36,12 +37,13 @@ export class Kiosk{
     }
     requireValue(Array.isArray(input.cidrs)&&input.cidrs.length<=32,'Choose at most 32 trusted private CIDRs');const cidrs=input.cidrs.map(kioskCidr);requireValue(new Set(cidrs).size===cidrs.length,'Choose unique trusted CIDRs');
     const areaIds=this.keypad.validateAreas(input.areaIds);requireValue(!input.enabled||input.origin&&cidrs.length&&(input.allAreas||areaIds.length),'Choose an origin, trusted CIDRs and available areas before enabling the kiosk');
-    return {enabled:input.enabled,origin:input.origin,cidrs,allAreas:input.allAreas,areaIds};
+    return {enabled:input.enabled,origin:input.origin,cidrs,allAreas:input.allAreas,areaIds,allowBypassArming:input.allowBypassArming===true};
   }
   config(){const stored=this.s.get('kioskSettings');if(!stored)return defaults();try{return this.validate(stored);}catch{return defaults();}}
   administrator(user){const current=user&&this.accounts.get(user.id);requireValue(current?.enabled&&current.role==='admin','Administrator access is required',403);return current;}
   settings(user){this.administrator(user);return {...this.config(),areas:this.security.areas().map(({id,name})=>({id,name}))};}
-  configure(user,input){const admin=this.administrator(user),config=this.validate(input);this.s.transaction(()=>{this.s.set('kioskSettings',config);this.security.event('kiosk_settings_changed','Local kiosk settings updated',{actor:admin.username});});return this.settings(admin);}
+  configure(user,input){const admin=this.administrator(user),config=this.validate(input);this.s.transaction(()=>{this.s.set('kioskSettings',config);this.security.event('kiosk_settings_changed','Local kiosk settings updated',{actor:admin.username});});this.generation++;for(const [token,preview] of this.keypad.armPreviews)if(preview.binding.startsWith('kiosk:'))this.keypad.armPreviews.delete(token);return this.settings(admin);}
+  binding(config){return 'kiosk:'+this.keypad.mac('kiosk-config\0'+this.generation+'\0'+JSON.stringify(config));}
   scope(config=this.config()){return config.allAreas?this.security.areas().map(area=>area.id):config.areaIds.filter(id=>!!this.security.area(id));}
   gate(req,{post=false,rate=false}={}){
     const config=this.config(),peer=kioskPeer(req.socket.remoteAddress),host=req.headers.host,protocol=req.socket.encrypted?'https:':'http:';
@@ -59,8 +61,8 @@ export class Kiosk{
   }
   area(area){
     const value=this.keypad.displayArea(area);
-    return {id:value.id,name:value.name,enabled:value.enabled,mode:value.mode,targetMode:value.targetMode,status:value.status,countdownSec:value.countdownSec,readyAway:value.readyAway,readyHome:value.readyHome,zoneCount:value.zoneCount,includedCount:value.includedCount,readyCount:value.readyCount,bypassedCount:value.bypassedCount,troubleCount:value.troubleCount,activeAlarmCount:value.activeAlarmCount,blockingZones:value.blockingZones.map(({id,name,status,trouble})=>({id,name,status,trouble})),zoneIssues:value.zoneIssues.map(({id,name,status,trouble,bypassed,homeExcluded})=>({id,name,status,trouble,bypassed,homeExcluded})),zoneTroubleCount:value.zoneTroubleCount,canArmAway:area.mode==='disarmed'&&!area.targetMode&&value.readyAway};
+    return {id:value.id,name:value.name,enabled:value.enabled,mode:value.mode,targetMode:value.targetMode,status:value.status,countdownSec:value.countdownSec,readyAway:value.readyAway,readyHome:value.readyHome,zoneCount:value.zoneCount,includedCount:value.includedCount,readyCount:value.readyCount,bypassedCount:value.bypassedCount,troubleCount:value.troubleCount,activeAlarmCount:value.activeAlarmCount,blockingZones:value.blockingZones.map(({id,name,status,trouble})=>({id,name,status,trouble})),zoneIssues:value.zoneIssues.map(({id,name,status,trouble,bypassed,manualBypassed,cycleBypassed,homeExcluded})=>({id,name,status,trouble,bypassed,manualBypassed,cycleBypassed,homeExcluded})),zoneTroubleCount:value.zoneTroubleCount,cycleBypassCount:value.cycleBypassCount,cycleBypasses:value.cycleBypasses,canArmAway:area.mode==='disarmed'&&!area.targetMode&&value.readyAway};
   }
-  state(config=this.config()){requireValue(config.enabled,'Local kiosk access is unavailable',403);const scope=new Set(this.scope(config));return {kiosk:true,now:this.keypad.now(),timezone:this.security.timezone,canArm:true,readOnly:false,areas:this.security.areas().filter(area=>scope.has(area.id)).map(area=>this.area(area))};}
-  command(input,config=this.config()){requireValue(config.enabled,'Local kiosk access is unavailable',403);const result=this.keypad.kioskCommand(input,this.scope(config));return {ok:true,action:result.action,areaIds:result.areaIds,areas:result.areaIds.map(id=>this.area(this.security.requireArea(id)))};}
+  state(config=this.config()){requireValue(config.enabled,'Local kiosk access is unavailable',403);const scope=new Set(this.scope(config));return {kiosk:true,now:this.keypad.now(),timezone:this.security.timezone,canArm:true,canBypassArm:config.allowBypassArming,armingRevision:this.keypad.armingRevision([...scope],this.binding(config)),readOnly:false,areas:this.security.areas().filter(area=>scope.has(area.id)).map(area=>this.area(area))};}
+  command(input){const config=this.config(),binding=this.binding(config);requireValue(config.enabled,'Local kiosk access is unavailable',403);const result=this.keypad.kioskCommand(input,this.scope(config),{allowBypassArming:config.allowBypassArming,binding,checkBypass:ids=>{const fresh=this.config(),scope=new Set(this.scope(fresh));requireValue(fresh.enabled&&fresh.allowBypassArming&&this.binding(fresh)===binding&&ids.every(id=>scope.has(id)),'Kiosk permissions changed',403);}});if(result.action==='prepare_arm_away')return result;return {ok:true,action:result.action,areaIds:result.areaIds,areas:result.areaIds.map(id=>this.area(this.security.requireArea(id)))};}
 }

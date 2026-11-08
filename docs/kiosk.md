@@ -6,6 +6,12 @@ zone issues, the date/time, and a numeric keypad. It has no dashboard navigation
 user administration, reports, broker settings or notification configuration.
 
 **Arm away** does not require a PIN. Existing zone readiness checks still apply.
+An administrator can separately enable **Allow bypass and arm**, which starts
+off. When enabled, a blocked arming attempt can list the exact zones to bypass
+and require an explicit warning confirmation and reason. Each selected area
+must retain at least one protected zone. The bypass lasts until that area is
+disarmed and does not bypass a shared detector in other areas. The kiosk keeps
+the bypassed zone names visible, including after their sensors return to normal.
 Disarming requires a personal four-digit PIN belonging to an enabled user with
 Security control permission. The requested areas must be permitted to both
 the kiosk and that PIN owner. **Disarm all permitted** covers the intersection
@@ -23,6 +29,8 @@ use the same persistent retry limit as the signed-in keypad.
    set of areas to display and control.
 5. Enable the kiosk and confirm the access change. The kiosk is disabled by
    default; an upgrade does not enable it or create a dashboard account.
+   Enable **Allow bypass and arm** only if people using that local page should
+   also be allowed to leave blocking zones unprotected for an arm cycle.
 6. Open the displayed address ending in `/kiosk` on the tablet. No dashboard
    password or browser login session is needed there.
 
@@ -43,7 +51,9 @@ origin and use JSON.
 
 Everyone who can access the enabled kiosk from those networks can see the
 selected area and zone status and arm those areas. The PIN remains required
-to disarm. Choose the kiosk networks and displayed areas accordingly. Remote
+to disarm. If **Allow bypass and arm** is enabled, those people can also confirm
+the temporary exclusion of blocking zones. Choose the kiosk networks, displayed
+areas and bypass permission accordingly. Remote
 access continues through the normal authenticated dashboard; `/kiosk` is not
 available through that remote route.
 

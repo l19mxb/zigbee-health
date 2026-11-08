@@ -154,7 +154,7 @@ test('keypad display reports an open Home-excluded zone without changing Home pr
     f.security.command(f.one.id,'arm_home',{},'Fixture');f.security.ingest('one',{contact:false});
     const area=f.keypad.state(f.wall).areas.find(area=>area.id===f.one.id),{zoneIssues,zoneTroubleCount,canArmAway,...original}=area;
     assert.deepEqual(original,f.security.areaView(f.security.area(f.one.id)));assert.equal(area.mode,'home');assert.equal(area.status,'armed');assert.equal(area.readyHome,true);assert.equal(area.readyAway,false);assert.deepEqual(area.blockingZones,[]);assert.equal(area.zoneCount,2);assert.equal(canArmAway,false);assert.equal(zoneTroubleCount,0);
-    assert.deepEqual(zoneIssues,[{id:f.zones[0].id,name:'House contact',status:'active',trouble:null,bypassed:false,homeExcluded:true}]);assert.equal(f.security.activeIncidents().length,0);
+    assert.deepEqual(zoneIssues,[{id:f.zones[0].id,name:'House contact',status:'active',trouble:null,bypassed:false,manualBypassed:false,cycleBypassed:false,homeExcluded:true}]);assert.equal(f.security.activeIncidents().length,0);
   }finally{f.close();}
 });
 
@@ -163,7 +163,7 @@ test('keypad display distinguishes unknown and offline Home-excluded detectors e
     f.security.saveZone({id:f.zones[0].id,homeBypass:true},'Fixture');f.security.saveZone({id:f.zones[1].id,areaIds:[f.one.id,f.two.id]},'Fixture');f.security.command(f.one.id,'arm_home',{},'Fixture');
     f.security.readings.delete('one');let area=f.keypad.state(f.wall).areas.find(area=>area.id===f.one.id);assert.equal(area.readyHome,true);assert.equal(area.troubleCount,0);assert.equal(area.zoneTroubleCount,1);assert.equal(area.zoneIssues[0].status,'unknown');assert.equal(area.zoneIssues[0].homeExcluded,true);assert.match(area.zoneIssues[0].trouble,/fresh sensor report/);
     f.s.saveDevice({...f.s.device('one'),availability:'offline'});f.security.bypassZone(f.zones[0].id,{durationMin:null,reason:'Synthetic maintenance'},'Fixture');area=f.keypad.state(f.wall).areas.find(area=>area.id===f.one.id);
-    assert.equal(area.readyHome,true);assert.equal(area.readyAway,true);assert.equal(area.troubleCount,0);assert.equal(area.zoneTroubleCount,1);assert.deepEqual(area.zoneIssues,[{id:f.zones[0].id,name:'House contact',status:'trouble',trouble:'Device offline',bypassed:true,homeExcluded:true}]);
+    assert.equal(area.readyHome,true);assert.equal(area.readyAway,true);assert.equal(area.troubleCount,0);assert.equal(area.zoneTroubleCount,1);assert.deepEqual(area.zoneIssues,[{id:f.zones[0].id,name:'House contact',status:'trouble',trouble:'Device offline',bypassed:true,manualBypassed:true,cycleBypassed:false,homeExcluded:true}]);
   }finally{f.close();}
 });
 

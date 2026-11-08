@@ -1,6 +1,6 @@
 import React,{useEffect,useMemo,useRef,useState} from 'react';
 import {request} from './api.jsx';
-import {Icon,Modal} from './ui.jsx';
+import {Field,Icon,Modal} from './ui.jsx';
 import {ThemeControl} from './theme.jsx';
 import './keypad.css';
 
@@ -21,12 +21,39 @@ function Led({tone,on=true,flashing=false,label}){return <span className={'keypa
 function AreaIndicators({status}){return <span className="keypad-led-cluster" role="group" aria-label="Area indicators"><span><Led tone="ready" on={status.readyOn} flashing={status.readyFlashing} label={'Ready indicator: '+status.readyLabel+(status.readyFlashing?', flashing green':status.readyOn?', steady green':', off')}/><small>{status.readyLabel==='Not ready'?'Not ready':status.readyLabel==='Alarm'?'Alarm':'Ready'}</small></span><span><Led tone="trouble" on={status.trouble} label={'Trouble indicator: '+(status.trouble?'on':'off')}/><small>Trouble</small></span><span><Led tone="armed" on={status.armed} label={'Armed indicator: '+status.armedLabel+(status.armed?', on':', off')}/><small>Armed</small></span></span>;}
 function notReadyZones(areas){
   const zones=new Map();
-  for(const area of areas)for(const zone of Array.isArray(area.zoneIssues)?area.zoneIssues:area.blockingZones||[]){
-    const previous=zones.get(zone.id),areaNames=previous?[...previous.areaNames,area.name]:[area.name];
-    const notes=[zone.bypassed?'Bypassed':null,zone.homeExcluded?'Bypassed in Home':null].filter(Boolean),contextNames=[...(previous?.contextNames||[]),...(notes.length?[area.name+': '+notes.join(', ')]:[])];
-    zones.set(zone.id,{...zone,areaNames,contextNames,reason:zone.trouble||(zone.status==='unknown'?'Waiting for a fresh reading':zone.status==='active'?'Open / active':'Not ready')});
+  for(const area of areas){
+    const cycleIds=new Set((area.cycleBypasses||[]).map(zone=>zone.id));
+    for(const zone of Array.isArray(area.zoneIssues)?area.zoneIssues:area.blockingZones||[]){
+      const previous=zones.get(zone.id),areaNames=previous?[...previous.areaNames,area.name]:[area.name];
+      const notes=[(zone.manualBypassed??(zone.bypassed&&!zone.cycleBypassed))?'Manually bypassed':null,zone.homeExcluded?'Bypassed in Home':null,zone.cycleBypassed||cycleIds.has(zone.id)?'Bypassed until disarm':null].filter(Boolean),contextNames=[...(previous?.contextNames||[]),...(notes.length?[area.name+': '+notes.join(', ')]:[])];
+      zones.set(zone.id,{...zone,areaNames,contextNames,reason:zone.trouble||(zone.status==='unknown'?'Waiting for a fresh reading':zone.status==='active'?'Open / active':'Not ready')});
+    }
   }
   return [...zones.values()];
+}
+const blockerSignature=areas=>JSON.stringify(areas.map(area=>({id:area.id,zones:(area.blockingZones||[]).map(zone=>({id:zone.id,status:zone.status,trouble:zone.trouble||null})).sort((a,b)=>a.id.localeCompare(b.id))})).sort((a,b)=>a.id.localeCompare(b.id)));
+const armingContext=value=>JSON.stringify({ids:(value.areas||[]).map(area=>area.id).sort(),revision:value.armingRevision||null,canArm:!!value.canArm,canBypassArm:!!value.canBypassArm,readOnly:!!value.readOnly});
+function reviewMatches(review,value){
+  const areas=review.areaIds.map(id=>(value?.areas||[]).find(area=>area.id===id));
+  return !!value?.canBypassArm&&!value.readOnly&&value.armingRevision===review.revision&&areas.every(area=>area&&editable(area)&&area.enabled&&!area.activeAlarmCount)&&blockerSignature(areas)===review.blockers;
+}
+function CycleBypasses({areas}){
+  const active=areas.filter(area=>area.cycleBypassCount>0||(area.cycleBypasses||[]).length);
+  if(!active.length)return null;
+  return <section className="keypad-cycle-bypasses" aria-label="Current arming cycle bypasses">{active.map(area=>{const number=area.cycleBypassCount??area.cycleBypasses.length;return <div key={area.id}><strong>{area.name} · {number} cycle {number===1?'bypass':'bypasses'}</strong><span>{(area.cycleBypasses||[]).map(zone=>zone.name).join(', ')}</span></div>;})}<p>These zones remain excluded until their area disarms.</p></section>;
+}
+function ArmBypassReview({review,now,busy,onClose,onConfirm}){
+  const [reason,setReason]=useState(''),[confirmed,setConfirmed]=useState(false);
+  const remaining=Math.max(0,Math.ceil((review.expiresAt-now)/1000)),excluded=review.areas.reduce((sum,area)=>sum+area.blockingZones.length,0);
+  const ready=remaining>0&&confirmed&&reason.trim().length>0&&!/[\u0000-\u001f\u007f]/.test(reason)&&review.areas.every(area=>area.protectedZoneCount>0);
+  return <Modal title="Bypass and arm Away" wide onClose={onClose}><form className="keypad-bypass-review" onSubmit={event=>{event.preventDefault();if(ready&&!busy)void onConfirm(reason.trim());}}>
+    <div className="notice warning"><strong>{count(excluded,'zone')} will be excluded from this arming cycle.</strong><p>Disarming each area ends its cycle bypasses. Review every listed zone before continuing.</p></div>
+    <div className="keypad-bypass-review-areas">{review.areas.map(area=><section key={area.id}><h3>{area.name}</h3><p>{count(area.protectedZoneCount,'protected zone')} will remain.</p>{area.blockingZones.length?<ul>{area.blockingZones.map(zone=><li key={zone.id}><strong>{zone.name}</strong><span>{zone.trouble||(zone.status==='unknown'?'Waiting for a fresh reading':'Open / active')}</span></li>)}</ul>:<p className="small muted">No additional zones will be excluded in this area.</p>}</section>)}</div>
+    <p className="keypad-review-expiry" aria-live="off">Review expires in {Math.floor(remaining/60)}:{String(remaining%60).padStart(2,'0')}</p>
+    <Field label="Reason for cycle bypass" hint="Required. Single-line text, up to 300 characters." required maxLength={300} value={reason} disabled={busy} onChange={event=>setReason(event.target.value)}/>
+    <label className="checkbox-field keypad-bypass-confirm"><input type="checkbox" required checked={confirmed} disabled={busy} onChange={event=>setConfirmed(event.target.checked)}/>These zones will not be protected until disarm</label>
+    <div className="form-actions"><button type="button" disabled={busy} onClick={onClose}>Cancel</button><button className="primary" disabled={busy||!ready}>{busy?'Arming…':'Bypass and arm selected'}</button></div>
+  </form></Modal>;
 }
 function PinPad({pin,onChange,disabled}){
   return <div className="keypad-pin-controls"><div className="keypad-pin-entry">
@@ -36,47 +63,83 @@ function PinPad({pin,onChange,disabled}){
 }
 
 export default function Keypad({onSecurity,kiosk=false,requestApi=request}){
-  const [state,setState]=useState(null),[loading,setLoading]=useState(true),[connectionError,setConnectionError]=useState(''),[commandError,setCommandError]=useState(''),[message,setMessage]=useState(''),[busy,setBusy]=useState(false),[selection,setSelection]=useState(null),[pin,setPin]=useState(''),[carousel,setCarousel]=useState(0),[dialog,setDialog]=useState(null),[clock,setClock]=useState(Date.now());
-  const pending=useRef(null),received=useRef(Date.now()),kioskScope=useRef(null);
+  const [state,setState]=useState(null),[loading,setLoading]=useState(true),[connectionError,setConnectionError]=useState(''),[commandError,setCommandError]=useState(''),[message,setMessage]=useState(''),[busy,setBusy]=useState(false),[selection,setSelection]=useState(null),[pin,setPin]=useState(''),[carousel,setCarousel]=useState(0),[dialog,setDialog]=useState(null),[clock,setClock]=useState(Date.now()),[armReview,setArmReview]=useState(null);
+  const pending=useRef(null),received=useRef(Date.now()),context=useRef(null),latestState=useRef(null),reviewRef=useRef(null),reviewEpoch=useRef(0),reviewFlight=useRef(false);
+  function discardReview(){reviewEpoch.current++;reviewRef.current=null;setArmReview(null);setDialog(null);setPin('');}
   async function refresh(){
     pending.current?.abort();const controller=new AbortController();pending.current=controller;
-    try{const value=await requestApi(kiosk?'kiosk/state':'keypad',undefined,controller.signal);if(kiosk){const scope=JSON.stringify((value.areas||[]).map(area=>area.id).sort());if(kioskScope.current!==null&&kioskScope.current!==scope){setPin('');setDialog(null);}kioskScope.current=scope;}received.current=Date.now();setState(value);setConnectionError('');return value;}
-    catch(error){if(error.name!=='AbortError'){setConnectionError(error.message);setPin('');if(kiosk)setState(null);}}
+    try{
+      const value=await requestApi(kiosk?'kiosk/state':'keypad',undefined,controller.signal),nextContext=armingContext(value);latestState.current=value;
+      if(context.current!==null&&context.current!==nextContext){const hadReview=!!reviewRef.current;discardReview();if(hadReview)setCommandError('Area settings or permissions changed. Review the zones again before arming.');}
+      context.current=nextContext;
+      if(reviewRef.current&&!reviewMatches(reviewRef.current,value)){discardReview();setCommandError('Zone conditions changed. Review the zones again before arming.');}
+      received.current=Date.now();setState(value);setConnectionError('');return value;
+    }
+    catch(error){if(error.name!=='AbortError'){setConnectionError(error.message);discardReview();if(kiosk){latestState.current=null;setState(null);}}}
     finally{if(!controller.signal.aborted)setLoading(false);}
   }
-  useEffect(()=>{void refresh();const poll=setInterval(()=>void refresh(),3000),tick=setInterval(()=>setClock(Date.now()),1000);const clear=()=>setPin(''),hidden=()=>{if(document.hidden)clear();};document.addEventListener('visibilitychange',hidden);window.addEventListener('pagehide',clear);return()=>{clearInterval(poll);clearInterval(tick);pending.current?.abort();document.removeEventListener('visibilitychange',hidden);window.removeEventListener('pagehide',clear);};},[]);
+  useEffect(()=>{void refresh();const poll=setInterval(()=>void refresh(),3000),tick=setInterval(()=>setClock(Date.now()),1000);const clear=()=>{setPin('');if(reviewRef.current||reviewFlight.current)discardReview();},hidden=()=>{if(document.hidden)clear();};document.addEventListener('visibilitychange',hidden);window.addEventListener('pagehide',clear);return()=>{clearInterval(poll);clearInterval(tick);pending.current?.abort();document.removeEventListener('visibilitychange',hidden);window.removeEventListener('pagehide',clear);};},[]);
   useEffect(()=>{if(!pin)return;const timer=setTimeout(()=>setPin(''),30000);return()=>clearTimeout(timer);},[pin]);
   const timezone=state?.timezone||'UTC';
   const formats=useMemo(()=>({time:new Intl.DateTimeFormat('en-GB',{timeZone:timezone,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}),date:new Intl.DateTimeFormat('en-GB',{timeZone:timezone,weekday:'long',day:'numeric',month:'long'})}),[timezone]);
   const now=(state?.now??Date.now())+Math.max(0,clock-received.current),areas=state?.areas||[];
+  useEffect(()=>{if(armReview&&now>=armReview.expiresAt){discardReview();setCommandError('Bypass review expired. Review the zones again before arming.');}},[armReview,now]);
   const selectedIds=(selection===null?areas.slice(0,1).map(area=>area.id):selection).filter(id=>areas.some(area=>area.id===id));
   const selected=areas.filter(area=>selectedIds.includes(area.id)),zones=notReadyZones(selected),index=Math.min(carousel,Math.max(0,zones.length-1)),zone=zones[index];
   const available=!!state&&!state.readOnly&&!connectionError&&!busy;
   const armReady=selected.length>0&&selected.every(area=>editable(area)&&area.enabled&&area.readyAway&&!area.activeAlarmCount);
   const mayArm=available&&state.canArm&&armReady,mayDisarm=available&&pin.length===4;
-  const choose=ids=>{setSelection(ids);setCarousel(0);setPin('');setCommandError('');setMessage('');};
+  const showBypassArm=!!state?.canBypassArm&&!armReady&&selected.length>0&&selected.every(editable);
+  const mayBypassArm=available&&state.canArm&&showBypassArm&&typeof state.armingRevision==='string'&&selected.every(area=>area.enabled&&area.zoneCount>0&&!area.activeAlarmCount);
+  const choose=ids=>{discardReview();setSelection(ids);setCarousel(0);setCommandError('');setMessage('');};
   async function command(action,all=false){
     if(!available)return;
     const body={action,...(all?{all:true}:{areaIds:selectedIds}),...(action==='disarm'?{pin}:{})};
-    setBusy(true);setCommandError('');setMessage('');setPin('');setDialog(null);
+    setBusy(true);setCommandError('');setMessage('');discardReview();
     try{const result=await requestApi(kiosk?'kiosk/command':'keypad/command',body);setMessage((action==='disarm'?'Disarmed ':'Armed Away · ')+count(result.areaIds?.length||0,'area')+'.');await refresh();}
     catch(error){setCommandError(error.message);if(kiosk&&error.status===403){setState(null);await refresh();}}
     finally{setBusy(false);}
   }
-  const closeDialog=()=>{if(!busy){setDialog(null);if(dialog==='disarm-all')setPin('');}};
+  async function prepareBypass(){
+    if(!mayBypassArm||reviewFlight.current)return;
+    discardReview();const epoch=reviewEpoch.current,areaIds=[...selectedIds];reviewFlight.current=true;setBusy(true);setCommandError('');setMessage('');
+    try{
+      const result=await requestApi(kiosk?'kiosk/command':'keypad/command',{action:'prepare_arm_away',areaIds}),preview=result.preview;
+      if(epoch!==reviewEpoch.current)return;
+      const fresh=await refresh();
+      if(!fresh||epoch!==reviewEpoch.current)throw Error('Area settings changed. Review the current zones again.');
+      if(!preview||typeof preview.token!=='string'||!preview.token||!Number.isFinite(preview.expiresAt)||preview.expiresAt<=fresh.now||!Array.isArray(preview.areas)||preview.areas.length!==areaIds.length||new Set(preview.areas.map(area=>area.id)).size!==areaIds.length||preview.areas.some(area=>!areaIds.includes(area.id)||!Array.isArray(area.blockingZones)||!Number.isInteger(area.protectedZoneCount)||area.protectedZoneCount<1))throw Error('The bypass review could not be verified. Review the current zones again.');
+      const value={...preview,areaIds,revision:fresh.armingRevision,blockers:blockerSignature(preview.areas),epoch};
+      if(!reviewMatches(value,fresh))throw Error('Zone conditions changed. Review the current zones again.');
+      if(!preview.areas.some(area=>area.blockingZones.length)){setMessage('The selected areas are ready. Use Arm away.');return;}
+      reviewRef.current=value;setArmReview(value);setDialog('bypass-arm');
+    }catch(error){discardReview();setCommandError(error.message);if(kiosk&&error.status===403){setState(null);await refresh();}}
+    finally{reviewFlight.current=false;setBusy(false);}
+  }
+  async function confirmBypass(reason){
+    const review=reviewRef.current;
+    if(reviewFlight.current||!available)return;
+    if(!review||review.epoch!==reviewEpoch.current||now>=review.expiresAt||!reviewMatches(review,latestState.current)||typeof reason!=='string'||!reason.trim()||reason.trim().length>300||/[\u0000-\u001f\u007f]/.test(reason)){discardReview();setCommandError('Bypass review is no longer current. Review the zones again before arming.');return;}
+    const body={action:'arm_away',areaIds:[...review.areaIds],bypass:{token:review.token,reason:reason.trim()}};reviewFlight.current=true;setBusy(true);discardReview();setCommandError('');setMessage('Applying the reviewed arm command…');
+    try{const result=await requestApi(kiosk?'kiosk/command':'keypad/command',body);setMessage('Armed Away · '+count(result.areaIds?.length||0,'area')+'. Cycle bypasses end when each area disarms.');await refresh();}
+    catch(error){discardReview();setMessage('');setCommandError(error.message+' Review the zones again before arming.');if(kiosk&&error.status===403){setState(null);await refresh();}}
+    finally{reviewFlight.current=false;setBusy(false);}
+  }
+  const closeDialog=()=>{if(!busy){if(dialog==='bypass-arm')discardReview();else{setDialog(null);if(dialog==='disarm-all')setPin('');}}};
   return <div className="keypad-workspace"><header className="keypad-header"><h1>Keypad</h1><div><ThemeControl/><time dateTime={new Date(now).toISOString()} aria-live="off"><strong>{formats.time.format(now)}</strong><span>{formats.date.format(now)}</span></time></div></header>
     {connectionError&&!kiosk?<div className="notice critical" role="alert"><strong>Keypad connection lost.</strong> Showing the last received state. Controls are unavailable until reconnection.<button onClick={refresh}>Reconnect</button></div>:null}
     {state?.message?<div className="notice" role="status">{state.message}</div>:null}
     {commandError?<div className="notice critical" role="alert">{commandError}</div>:null}{message?<div className="notice" role="status">{message}</div>:null}
     {!state?kiosk&&connectionError?<section className="kiosk-unavailable"><Icon name="shield" size={35}/><h2>Local keypad unavailable</h2><p role="alert">{connectionError}</p><p>Open the configured direct local IP address from an allowed local network. Tunnels and reverse proxies cannot open this keypad.</p><button onClick={refresh}>Try again</button></section>:<div className="keypad-loading" role={connectionError?'alert':'status'}>{loading?'Opening keypad…':connectionError}{connectionError?<button onClick={refresh}>Try again</button>:null}</div>:!areas.length?<section className="keypad-empty"><Icon name="shield" size={35}/><h2>{kiosk?'No areas available on this kiosk':'No security areas configured'}</h2><p>{kiosk?'An administrator can update the local kiosk area selection.':'An administrator can add areas and zones under Security. New areas start disarmed.'}</p>{onSecurity&&!kiosk?<button onClick={onSecurity}>Open Security</button>:null}</section>:<div className="keypad-console">
-      <section className="keypad-areas" aria-label="Keypad areas"><div className="keypad-areas-heading"><h2>Areas</h2><button disabled={busy} onClick={()=>choose(selectedIds.length===areas.length?[]:areas.map(area=>area.id))}>{selectedIds.length===areas.length?'Clear selection':'Select all'}</button></div><div className="keypad-area-list">{areas.map(area=>{const status=indicator(area),checked=selectedIds.includes(area.id);return <label key={area.id} className={'keypad-area-row '+(checked?'selected':'')}><input type="checkbox" aria-label={'Select area '+area.name} checked={checked} disabled={busy} onChange={event=>choose(event.target.checked?[...selectedIds,area.id]:selectedIds.filter(id=>id!==area.id))}/><span className="keypad-area-copy"><strong>{area.name}</strong><small>{status.label}</small></span><AreaIndicators status={status}/></label>;})}</div><div className="keypad-legend" aria-label="Area status legend"><span><Led tone="ready"/>Ready</span><span><Led tone="ready" flashing/>Not ready / alarm</span><span><Led tone="trouble"/>Trouble</span><span><Led tone="armed"/>Armed</span></div></section>
+      <section className="keypad-areas" aria-label="Keypad areas"><div className="keypad-areas-heading"><h2>Areas</h2><button disabled={busy} onClick={()=>choose(selectedIds.length===areas.length?[]:areas.map(area=>area.id))}>{selectedIds.length===areas.length?'Clear selection':'Select all'}</button></div><div className="keypad-area-list">{areas.map(area=>{const status=indicator(area),checked=selectedIds.includes(area.id);return <label key={area.id} className={'keypad-area-row '+(checked?'selected':'')}><input type="checkbox" aria-label={'Select area '+area.name} checked={checked} disabled={busy} onChange={event=>choose(event.target.checked?[...selectedIds,area.id]:selectedIds.filter(id=>id!==area.id))}/><span className="keypad-area-copy"><strong>{area.name}</strong><small>{status.label}</small>{area.cycleBypassCount>0?<small className="keypad-cycle-count">{area.cycleBypassCount} cycle {area.cycleBypassCount===1?'bypass':'bypasses'}</small>:null}</span><AreaIndicators status={status}/></label>;})}</div><div className="keypad-legend" aria-label="Area status legend"><span><Led tone="ready"/>Ready</span><span><Led tone="ready" flashing/>Not ready / alarm</span><span><Led tone="trouble"/>Trouble</span><span><Led tone="armed"/>Armed</span></div></section>
       <section className="keypad-control-panel" aria-label="Area keypad"><header className="keypad-selection"><h2>{selected.length===1?selected[0].name:selected.length?count(selected.length,'area')+' selected':'Select areas'}</h2><p>{selected.length===1?'1 area selected':selected.length?selected.map(area=>area.name).join(', '):'Choose one or more areas from the list.'}</p></header>
+        <CycleBypasses areas={selected}/>
         <div className="keypad-not-ready-carousel" aria-live="polite"><button className="icon-button" aria-label="Previous not ready zone" disabled={zones.length<2} onClick={()=>setCarousel((index+zones.length-1)%zones.length)}><Icon name="chevron" className="flip" size={25}/></button><div>{zone?<><strong>{zone.name}</strong><p>{zone.reason} · {index+1} of {zones.length} not ready</p>{selected.length>1?<small>{zone.areaNames.join(', ')}</small>:null}{zone.contextNames.length?<small>{zone.contextNames.join('; ')}</small>:null}</>:<><strong>{!selected.length?'Select an area':armReady?'All selected areas ready':selected.every(area=>area.mode!=='disarmed')?'Selected areas armed':'Area status'}</strong><p>{!selected.length?'Area selection is required for commands.':armReady?'Ready to arm Away':selected.some(area=>area.activeAlarmCount)?'Alarm memory must be acknowledged and reset in Security.':selected.some(area=>!area.enabled)?'One or more selected areas are disabled.':selected.some(area=>!area.zoneCount)?'Add an enabled zone before arming.':'Review the selected area status before arming.'}</p></>}</div><button className="icon-button" aria-label="Next not ready zone" disabled={zones.length<2} onClick={()=>setCarousel((index+1)%zones.length)}><Icon name="chevron" size={25}/></button></div>
         <button className="text-button keypad-all-zones" disabled={!zones.length} onClick={()=>setDialog('zones')}>Show all not ready zones</button>
-        <div className="keypad-entry-grid"><PinPad pin={pin} onChange={setPin} disabled={busy||!!connectionError||state.readOnly}/><div className="keypad-command-buttons"><button className="primary" disabled={!mayArm} title={!state.canArm?'Security control access is required':!armReady?'Select only disarmed, ready areas to arm':undefined} onClick={()=>void command('arm_away')}>Arm away</button><button className="keypad-disarm-selected" disabled={!mayDisarm||!selected.length} onClick={()=>void command('disarm')}>Disarm selected</button><button className="keypad-disarm-all" disabled={!mayDisarm} onClick={()=>setDialog('disarm-all')}>{kiosk?'Disarm all permitted':'Disarm all assigned'}</button></div></div>
+        <div className="keypad-entry-grid"><PinPad pin={pin} onChange={setPin} disabled={busy||!!connectionError||state.readOnly}/><div className="keypad-command-buttons"><button className="primary" disabled={!mayArm} title={!state.canArm?'Security control access is required':!armReady?'Select only disarmed, ready areas to arm':undefined} onClick={()=>void command('arm_away')}>Arm away</button>{showBypassArm?<button className="keypad-bypass-arm" disabled={!mayBypassArm} title="Review exact cycle exclusions before arming" onClick={()=>void prepareBypass()}>Bypass and arm…</button>:null}<button className="keypad-disarm-selected" disabled={!mayDisarm||!selected.length} onClick={()=>void command('disarm')}>Disarm selected</button><button className="keypad-disarm-all" disabled={!mayDisarm} onClick={()=>setDialog('disarm-all')}>{kiosk?'Disarm all permitted':'Disarm all assigned'}</button></div></div>
         <p className="keypad-footnote">{kiosk?'Local kiosk: arm selected ready areas without a PIN. Disarming requires an authorised PIN.':<>Arm away does not need a PIN.{!state.canArm?' Your session needs security control access to arm areas.':''}</>}</p>
       </section>
     </div>}
-    {dialog==='zones'?<Modal title="Not ready zones" wide onClose={closeDialog}><p className="keypad-zone-help">Enabled zones that are open or have trouble, including zones bypassed manually or in Home mode. Arming follows the existing area rules.</p><div className="table-scroll keypad-zone-table"><table><thead><tr><th>Zone</th><th>Area</th><th>Reason</th></tr></thead><tbody>{zones.map(item=><tr key={item.id}><td><strong>{item.name}</strong></td><td>{item.areaNames.join(', ')}</td><td>{item.reason}{item.contextNames.length?<span className="row-subtitle">{item.contextNames.join('; ')}</span>:null}</td></tr>)}</tbody></table></div><div className="form-actions"><button onClick={closeDialog}>Close</button></div></Modal>:dialog==='disarm-all'?<Modal title={kiosk?'Disarm all permitted kiosk areas':'Disarm all assigned areas'} onClose={closeDialog}><p>{kiosk?'Disarm every area permitted by both this kiosk and the entered PIN, including permitted areas not selected on this screen.':'Disarm every area assigned to the entered PIN, including areas not selected on this screen. The PIN owner must have security control access.'}</p><div className="form-actions"><button disabled={busy} onClick={closeDialog}>Cancel</button><button className="primary" disabled={!mayDisarm} onClick={()=>void command('disarm',true)}>{kiosk?'Disarm all permitted':'Disarm all assigned'}</button></div></Modal>:null}
+    {dialog==='bypass-arm'&&armReview?<ArmBypassReview review={armReview} now={now} busy={busy} onClose={closeDialog} onConfirm={confirmBypass}/>:dialog==='zones'?<Modal title="Not ready zones" wide onClose={closeDialog}><p className="keypad-zone-help">Enabled zones that are open or have trouble, including zones bypassed manually or in Home mode. Arming follows the existing area rules.</p><div className="table-scroll keypad-zone-table"><table><thead><tr><th>Zone</th><th>Area</th><th>Reason</th></tr></thead><tbody>{zones.map(item=><tr key={item.id}><td><strong>{item.name}</strong></td><td>{item.areaNames.join(', ')}</td><td>{item.reason}{item.contextNames.length?<span className="row-subtitle">{item.contextNames.join('; ')}</span>:null}</td></tr>)}</tbody></table></div><div className="form-actions"><button onClick={closeDialog}>Close</button></div></Modal>:dialog==='disarm-all'?<Modal title={kiosk?'Disarm all permitted kiosk areas':'Disarm all assigned areas'} onClose={closeDialog}><p>{kiosk?'Disarm every area permitted by both this kiosk and the entered PIN, including permitted areas not selected on this screen.':'Disarm every area assigned to the entered PIN, including areas not selected on this screen. The PIN owner must have security control access.'}</p><div className="form-actions"><button disabled={busy} onClick={closeDialog}>Cancel</button><button className="primary" disabled={!mayDisarm} onClick={()=>void command('disarm',true)}>{kiosk?'Disarm all permitted':'Disarm all assigned'}</button></div></Modal>:null}
   </div>;
 }

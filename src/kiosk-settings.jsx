@@ -3,8 +3,8 @@ import {request} from './api.jsx';
 import {Badge,Field,Icon} from './ui.jsx';
 import './kiosk-settings.css';
 
-const draftOf=value=>({enabled:value.enabled===true,origin:value.origin||'',cidrText:(value.cidrs||[]).join('\n'),allAreas:value.allAreas!==false,areaIds:value.areaIds||[]});
-const configOf=value=>({enabled:value.enabled,origin:value.origin.trim(),cidrs:value.cidrText.split(/\r?\n/).map(line=>line.trim()).filter(Boolean),allAreas:value.allAreas,areaIds:value.allAreas?[]:[...value.areaIds].sort()});
+const draftOf=value=>({enabled:value.enabled===true,origin:value.origin||'',cidrText:(value.cidrs||[]).join('\n'),allAreas:value.allAreas!==false,areaIds:value.areaIds||[],allowBypassArming:value.allowBypassArming===true});
+const configOf=value=>({enabled:value.enabled,origin:value.origin.trim(),cidrs:value.cidrText.split(/\r?\n/).map(line=>line.trim()).filter(Boolean),allAreas:value.allAreas,areaIds:value.allAreas?[]:[...value.areaIds].sort(),allowBypassArming:value.allowBypassArming});
 const equal=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
 export default function KioskSettings(){
   const [saved,setSaved]=useState(null),[draft,setDraft]=useState(null),[error,setError]=useState(''),[message,setMessage]=useState(''),[busy,setBusy]=useState(false),[confirmed,setConfirmed]=useState(false);
@@ -14,7 +14,7 @@ export default function KioskSettings(){
   if(!draft)return <section className="panel config-panel kiosk-settings"><header className="panel-heading"><h2>Local kiosk</h2></header><p role={error?'alert':'status'}>{error||'Loading local kiosk settings…'}</p>{error?<button onClick={()=>{setError('');void load().catch(error=>setError(error.message));}}>Try again</button>:null}</section>;
   const value=configOf(draft),previous=configOf(draftOf(saved)),dirty=!equal(value,previous);
   const scopeChanged=value.origin!==previous.origin||!equal(value.cidrs,previous.cidrs)||value.allAreas!==previous.allAreas||!equal(value.areaIds,previous.areaIds);
-  const needsConfirmation=dirty&&(value.enabled&&!previous.enabled||scopeChanged);
+  const needsConfirmation=dirty&&(value.enabled&&!previous.enabled||scopeChanged||value.allowBypassArming&&!previous.allowBypassArming);
   const areas=saved.areas||[],missing=draft.areaIds.filter(id=>!areas.some(area=>area.id===id));
   const savedAddress=saved.origin?saved.origin.replace(/\/$/,'')+'/kiosk':'';
   async function submit(event){
@@ -41,7 +41,8 @@ export default function KioskSettings(){
       {!draft.allAreas?<fieldset className="kiosk-settings-areas" disabled={busy}><legend>Selected kiosk areas</legend>{areas.length?areas.map(area=><label className="checkbox-field" key={area.id}><input type="checkbox" aria-label={'Allow kiosk area '+area.name} checked={draft.areaIds.includes(area.id)} onChange={event=>change('areaIds',event.target.checked?[...draft.areaIds,area.id]:draft.areaIds.filter(id=>id!==area.id))}/>{area.name}</label>):<p className="small muted">No security areas are available yet.</p>}{missing.map((id,index)=><label className="checkbox-field" key={id}><input type="checkbox" checked onChange={()=>change('areaIds',draft.areaIds.filter(value=>value!==id))}/>Unavailable area {index+1} · remove this selection</label>)}</fieldset>:<p className="small muted">All {areas.length} current security areas are included.</p>}
       <p className="small muted">A PIN can disarm only areas permitted by both its owner and this kiosk. Existing readiness checks still apply when arming.</p>
     </section>
-    {needsConfirmation?<label className="checkbox-field kiosk-settings-confirm"><input type="checkbox" checked={confirmed} onChange={event=>setConfirmed(event.target.checked)} disabled={busy}/>I confirm the local network and area scope. When enabled, people meeting these rules can view and arm without signing in; disarming requires an authorised PIN.</label>:null}
+    <section className="config-section"><h3>Reviewed arming exceptions</h3><label className="checkbox-field"><input type="checkbox" checked={draft.allowBypassArming} disabled={busy} onChange={event=>change('allowBypassArming',event.target.checked)}/>Allow bypass-and-arm on this kiosk</label><p className="small muted">Disabled by default. When allowed, kiosk users can review and exclude open, offline or unknown zones for the current arming cycle. Each area must retain at least one protected zone. Its cycle exclusions end when it disarms.</p>{draft.allowBypassArming?<p className="notice warning">The reviewed zones will be unprotected for that arming cycle, including after their sensors return to normal.</p>:null}</section>
+    {needsConfirmation?<label className="checkbox-field kiosk-settings-confirm"><input type="checkbox" checked={confirmed} onChange={event=>setConfirmed(event.target.checked)} disabled={busy}/>I confirm the local network and area scope. When enabled, people meeting these rules can view and arm without signing in; disarming requires an authorised PIN.{value.allowBypassArming?' I also allow reviewed bypass-and-arm, with the listed zones unprotected until disarm.':''}</label>:null}
     {error?<div className="notice critical" role="alert">{error}</div>:null}{message?<div className="notice" role="status">{message}</div>:null}
     <footer className="kiosk-settings-footer"><span className="small muted">Only an administrator can change these settings.</span><button className="primary" disabled={busy||!dirty||needsConfirmation&&!confirmed}>{busy?'Saving…':'Save kiosk settings'}</button></footer>
   </form>;
