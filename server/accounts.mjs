@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 
 export const roles=Object.freeze(['admin','operator','viewer']);
-export const permissionKeys=Object.freeze(['viewHealth','viewReports','acknowledge','manageShunts','manageDevices','manageBrokers','manageThresholds','manageEmail','manageNotifications']);
+export const permissionKeys=Object.freeze(['viewHealth','viewReports','acknowledge','manageShunts','manageDevices','manageBrokers','manageThresholds','manageEmail','manageNotifications','viewSecurity','controlSecurity','manageSecurity']);
 export const rolePermissions=Object.freeze({admin:Object.freeze([...permissionKeys].sort()),operator:Object.freeze(['viewHealth','viewReports','acknowledge','manageShunts'].sort()),viewer:Object.freeze(['viewHealth','viewReports'].sort())});
 const normalizePermissions=(value,access)=>{
   if(value===undefined)return [...rolePermissions[access]];
@@ -9,11 +9,14 @@ const normalizePermissions=(value,access)=>{
   if(access==='admin'&&value.length!==permissionKeys.length)throw Error('Administrators have every feature permission');
   const result=[...value];
   if((result.includes('acknowledge')||result.includes('manageShunts'))&&!result.includes('viewHealth'))result.push('viewHealth');
+  if((result.includes('controlSecurity')||result.includes('manageSecurity'))&&!result.includes('viewSecurity'))result.push('viewSecurity');
   return result.sort();
 };
 export const hasPermission=(user,key)=>!!user?.enabled&&permissionKeys.includes(key)&&(user.role==='admin'||Array.isArray(user.permissions)&&user.permissions.includes(key));
 const PASSWORD_OPTIONS={N:32768,r:8,p:3,maxmem:64*1024*1024};
-const dto=row=>row?{id:row.id,username:row.username,displayName:row.display_name,role:row.role,permissions:normalizePermissions(row.permissions===null?undefined:JSON.parse(row.permissions),row.role),enabled:!!row.enabled,authVersion:row.auth_version,createdAt:row.created_at,updatedAt:row.updated_at,lastLoginAt:row.last_login_at}:null;
+// Administrator is a fixed full-access role. Project new features without rewriting
+// existing account rows or invalidating remembered sessions during an app update.
+const dto=row=>row?{id:row.id,username:row.username,displayName:row.display_name,role:row.role,permissions:row.role==='admin'?[...rolePermissions.admin]:normalizePermissions(row.permissions===null?undefined:JSON.parse(row.permissions),row.role),enabled:!!row.enabled,authVersion:row.auth_version,createdAt:row.created_at,updatedAt:row.updated_at,lastLoginAt:row.last_login_at}:null;
 const username=value=>{
   if(typeof value!=='string')throw Error('Enter a username');
   const result=value.trim().toLowerCase();
@@ -80,7 +83,7 @@ export class Accounts{
     if(body.username!==undefined)throw Error('Usernames cannot be changed');
     return this.s.transaction(()=>{
       const old=this.requireUser(body.id),label=body.displayName===undefined?old.display_name:displayName(body.displayName),access=body.role===undefined?old.role:role(body.role);
-      const oldPermissions=dto(old).permissions,permissions=body.permissions===undefined&&access===old.role?oldPermissions:normalizePermissions(body.permissions,access),permissionsChanged=JSON.stringify(permissions)!==JSON.stringify(oldPermissions);
+      const oldPermissions=dto(old).permissions,storedPermissions=old.permissions===null?oldPermissions:JSON.parse(old.permissions),permissions=body.permissions===undefined&&access===old.role?oldPermissions:normalizePermissions(body.permissions,access),permissionsChanged=JSON.stringify(permissions)!==JSON.stringify([...storedPermissions].sort());
       if(body.enabled!==undefined&&typeof body.enabled!=='boolean')throw Error('User enabled state must be on or off');
       const enabled=body.enabled===undefined?!!old.enabled:body.enabled;
       if(old.enabled&&old.role==='admin'&&(!enabled||access!=='admin')&&this.s.one("SELECT count(*) n FROM users WHERE role='admin' AND enabled=1").n<=1)throw Error('Keep at least one enabled administrator');

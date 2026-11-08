@@ -11,6 +11,7 @@ const roleLabel=role=>roleNames[role]||role;
 const featureGroups=[
   {label:'Monitoring',features:[['viewHealth','Health monitor'],['viewReports','History & reports']]},
   {label:'Alarm handling',features:[['acknowledge','Acknowledge / process alarms'],['manageShunts','Apply / cancel shunts']]},
+  {label:'Security',features:[['viewSecurity','View security areas & alarms'],['controlSecurity','Arm / disarm & bypass zones'],['manageSecurity','Security setup & alert actions']]},
   {label:'Configuration',features:[['manageDevices','Device records & settings'],['manageBrokers','Brokers & live topic log'],['manageThresholds','Thresholds & retention'],['manageEmail','Email settings'],['manageNotifications','App address & global push']]}
 ];
 const features=featureGroups.flatMap(group=>group.features),featureKeys=features.map(([key])=>key);
@@ -67,8 +68,8 @@ function UserDialog({action,currentUser,enabledAdmins,onClose,onSave}){
   function choosePreset(value){setRole(value);setPermissions(presets[value]);setConfirmed(false);}
   function toggleFeature(key,checked){
     const next=new Set(permissions);
-    if(checked){next.add(key);if(key==='acknowledge'||key==='manageShunts')next.add('viewHealth');}
-    else{next.delete(key);if(key==='viewHealth'){next.delete('acknowledge');next.delete('manageShunts');}}
+    if(checked){next.add(key);if(key==='acknowledge'||key==='manageShunts')next.add('viewHealth');if(key==='controlSecurity'||key==='manageSecurity')next.add('viewSecurity');}
+    else{next.delete(key);if(key==='viewHealth'){next.delete('acknowledge');next.delete('manageShunts');}if(key==='viewSecurity'){next.delete('controlSecurity');next.delete('manageSecurity');}}
     setPermissions(featureKeys.filter(value=>next.has(value)));setConfirmed(false);
   }
   const titles={create:'Add user',edit:'Edit user',reset:'Reset user password',revoke:'Sign out user everywhere'};
@@ -94,7 +95,7 @@ function UserDialog({action,currentUser,enabledAdmins,onClose,onSave}){
     {type==='create'||type==='edit'?<>
       <Field label="Display name" required autoFocus={type==='edit'} autoComplete="off" maxLength={100} value={displayName} onChange={e=>setDisplayName(e.target.value)}/>
       <Field label="Access preset"><select value={role} disabled={lastAdmin} onChange={e=>choosePreset(e.target.value)}>{roles.map(value=><option value={value} key={value}>{roleLabel(value)}</option>)}</select></Field><p className="small muted user-role-help">{roleDetails[role]}</p>
-      <section className="user-features" aria-label="Feature access"><div className="user-features-heading"><h3>Allowed features</h3><AccessSummary user={{role,permissions}}/></div><p className="small muted">{role==='admin'?'Administrators have every feature and user administration.':'Tick each feature this person can use. Their own password and notification preferences are always available.'}</p><div className="user-feature-groups">{featureGroups.map(group=><fieldset key={group.label} disabled={role==='admin'}><legend>{group.label}</legend>{group.features.map(([key,label])=><label className="checkbox-field" key={key}><input type="checkbox" checked={permissions.includes(key)} onChange={e=>toggleFeature(key,e.target.checked)}/>{label}</label>)}</fieldset>)}</div><p className="small muted">Acknowledgement, shunts and alarm push require the health monitor. Turning it off also turns off those two actions.</p></section>
+      <section className="user-features" aria-label="Feature access"><div className="user-features-heading"><h3>Allowed features</h3><AccessSummary user={{role,permissions}}/></div><p className="small muted">{role==='admin'?'Administrators have every feature and user administration.':'Tick each feature this person can use. Their own password and notification preferences are always available.'}</p><div className="user-feature-groups">{featureGroups.map(group=><fieldset key={group.label} disabled={role==='admin'}><legend>{group.label}</legend>{group.features.map(([key,label])=><label className="checkbox-field" key={key}><input type="checkbox" checked={permissions.includes(key)} onChange={e=>toggleFeature(key,e.target.checked)}/>{label}</label>)}</fieldset>)}</div><p className="small muted">Acknowledgement, shunts and alarm push require the health monitor. Turning it off also turns off those two actions. Security controls and setup require security view access; turning it off also turns off those two features.</p></section>
       {type==='edit'?<label className="checkbox-field"><input type="checkbox" checked={enabled} disabled={lastAdmin} onChange={e=>{setEnabled(e.target.checked);setConfirmed(false);}}/>Account enabled</label>:null}
       {lastAdmin?<div className="notice">This is the last enabled administrator. Add or enable another administrator before changing this account’s role or disabling it.</div>:null}
     </>:null}

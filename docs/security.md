@@ -1,0 +1,130 @@
+# Security
+
+Security provides a residential-style area panel alongside the Health monitor.
+It uses your existing Zigbee2MQTT devices and broker connections. A live workspace
+starts with no security areas, zones, schedules or alert actions configured.
+The isolated simulation includes synthetic examples and cannot send real alerts.
+
+## Set up an area
+
+1. Open **Security**, then **Add area**. Give the area a name and choose its
+   entry and exit delays. New areas are disarmed.
+2. Open **Zones** and add the devices that protect that area. Each zone names a
+   device property and the value that means activation. For a typical
+   Zigbee2MQTT contact sensor, `contact: false` means open; for a motion sensor,
+   `occupancy: true` means motion. Check your device's actual reported values.
+3. Choose **Entry** for an entry route that should start the area's entry delay,
+   or **Instant** for immediate activation. Choose whether the zone is bypassed
+   in Home mode, for example an indoor motion sensor.
+4. Wait for fresh reports from the selected properties. The panel shows unknown,
+   open/active and unavailable zones instead of claiming they are ready.
+5. Add optional schedules and alert actions, then enable each one deliberately.
+
+Device identities use the existing network and Zigbee IEEE identity. Renaming a
+device preserves its zone link. A retired, disabled, missing or unavailable
+device becomes a zone trouble condition; a replacement device must be selected
+explicitly. Broker/device availability does not itself count as intrusion.
+
+## Operate the panel
+
+- **Arm Away** monitors all enabled, non-bypassed zones in the selected area.
+- **Arm Home** also excludes zones configured to be bypassed in Home mode.
+- Arming checks readiness. Unknown, unavailable or already-active participating
+  zones block arming, and readiness is checked again when an exit delay ends.
+  Existing alarm memory must be cleared before another arm cycle.
+- An Entry zone starts the entry countdown. Disarming before it ends cancels
+  that pending intrusion. Instant zones can raise an alarm immediately.
+- **Disarm** stops further intrusion evaluation for the area. It retains alarm
+  memory and its audit trail. An alert already queued for a raised intrusion
+  still gets its attempt; disarming during an entry delay creates no intrusion.
+- **Acknowledge** records that an operator has seen the alarm. **Reset** clears
+  working alarm memory after the area is disarmed. These are separate actions.
+- A zone can be bypassed for a chosen time or indefinitely, with a reason. Its
+  real status and the bypass remain visible. Ending a bypass does not manufacture
+  a new sensor activation.
+
+Area configuration is changed while the area is disarmed. The panel is controlled
+by the signed-in account; it does not implement a separate numeric keypad PIN.
+
+## Schedules
+
+Add separate weekly entries for arming and disarming. Each entry specifies an
+area, weekdays, local time, timezone and desired mode. Schedules start disabled.
+They use the same readiness checks as manual arming and record blocked attempts.
+They do not automatically bypass open or unavailable zones.
+
+Timezone rules account for daylight saving. A repeated local minute runs once;
+a nonexistent local time is skipped. Schedules do not catch up missed actions
+after downtime or a clock jump. Review the event history when a scheduled arm
+did not complete. Display times follow the application timezone.
+
+## MQTT and email alert actions
+
+Actions belong to an area and start disabled. When a fresh activation raises an
+intrusion, each enabled action receives one queued attempt for that incident.
+Repeated active reports do not produce a stream of alerts. Alarm acknowledgement,
+disarm and reset retain their separate meanings.
+
+For **MQTT**, select an existing broker and a concrete event topic, for example
+`security/alerts`. The payload is a JSON object with optional placeholders:
+
+```json
+{
+  "event": "{{event}}",
+  "area": "{{area}}",
+  "zone": "{{zone}}",
+  "device": "{{device}}",
+  "timestamp": "{{timestamp}}",
+  "incidentId": "{{incidentId}}"
+}
+```
+
+`{{mode}}` is also available. Values are substituted as data; templates cannot
+run JavaScript. Topics cannot contain wildcards, reserved system prefixes,
+device `/set` or `/get` commands, or bridge request paths. Messages use QoS 1
+and are not retained. Broker acceptance does not prove that a downstream consumer
+acted on a message. Consumers can use `incidentId` to identify an incident.
+
+For **Email**, use the existing SMTP configuration and recipient. Set a security
+subject and message using the same placeholders. An accepted result means SMTP
+acceptance, rather than confirmed inbox delivery. Existing health email and
+health browser-push settings remain separate; this release's security outputs
+are MQTT and email.
+
+The publisher is separate from the subscription-only health collector. An attempt
+is recorded before sending. Ambiguous or interrupted attempts are marked
+uncertain and are never automatically retried. Queued pre-restart outputs are
+suppressed, rather than replayed when the service returns. Disabling or removing
+an action, or explicitly resetting its incident, suppresses messages still queued
+for a future attempt. An attempt already in progress may finish.
+Queued attempts expire after five minutes rather than sending a stale alert.
+No alerts are sent merely by opening the panel or configuring an area.
+
+## Restart behaviour
+
+Fully armed Home/Away areas and latched alarm memory persist across a restart.
+The panel requires fresh zone reports again and shows trouble while waiting.
+Retained or duplicate MQTT messages cannot establish a fresh activation. A fresh
+activation in an already-armed area can raise an intrusion after reconnection;
+repeated active reports do not create another incident in that arm cycle.
+
+An unfinished exit delay is cancelled and the area returns to Disarmed with an
+audit event. A restart during an entry delay retains the area as armed and
+latches the pending activation in alarm memory without replaying outputs. An
+operator should review that memory before resetting the area.
+
+## Permissions, storage and backup
+
+**View security areas & alarms**, **Arm / disarm & bypass zones** and
+**Security setup & alert actions** are separate per-user feature checkboxes.
+The latter two imply panel visibility but do not imply each other. Setup includes
+authoring and enabling schedules, so it permits automated arm/disarm decisions;
+grant it only to trusted security-automation authors. The control checkbox governs
+manual operation. A security-only user does not inherit broker credentials,
+SMTP administration or unrelated health history. Administrator access remains
+fixed to every feature; existing Operator/Viewer presets remain unchanged.
+
+Security configuration, incidents, activity and delivery results are stored in
+the same SQLite database and included in the existing database/key backup.
+History follows **Thresholds & retention**, defaulting to 90 days. Working alarm
+memory, area/zone configuration and active bypasses survive history pruning.

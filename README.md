@@ -1,7 +1,8 @@
 # Zigbee Health
 
-A self-hosted, alarm-first dashboard for devices across multiple Zigbee2MQTT
-networks. Try the isolated simulation without connecting to a broker.
+A self-hosted dashboard for device health and area-based Zigbee security across
+multiple Zigbee2MQTT networks. Try the isolated simulation without connecting
+to a broker.
 
 ![Dashboard with synthetic demonstration devices](docs/dashboard.png)
 
@@ -23,6 +24,10 @@ networks. Try the isolated simulation without connecting to a broker.
 - Individual user accounts with feature checkboxes, access presets, per-person
   audit attribution and session revocation.
 - Light, Dark and System colour themes, remembered in each browser.
+- Residential-style security panel with areas, device zones, Home/Away modes,
+  entry/exit delays, bypasses, latched alarm memory and weekly schedules.
+- Optional security MQTT event messages and SMTP alerts, with an independent
+  publisher, configurable message templates and recorded delivery results.
 - Editable **90-day default retention**. Working alarms, active shunts and current
   configuration survive history cleanup.
 
@@ -83,7 +88,7 @@ access; do not expose the unencrypted administrative interface to the internet.
 
 On first account setup, the app creates username **`admin`** with the configured
 `APP_PASSWORD` (or Compose's `ZIGBEE_HEALTH_PASSWORD`). When upgrading from the
-shared-password version to v0.4.2, use `admin` and the existing dashboard password.
+shared-password version to the account-based releases, use `admin` and the existing dashboard password.
 Existing identity-less sessions are signed out during migration. The database,
 device history and notification configuration remain in the same data directory.
 
@@ -121,6 +126,9 @@ The user list and account page show the enabled features and their count.
 | Thresholds & retention | Global health thresholds and retention settings |
 | Email settings | Shared SMTP configuration and delivery history |
 | App address & global push | Shared HTTPS address and global push settings |
+| View security areas & alarms | Area status, zones, security alarm memory and activity |
+| Arm / disarm & bypass zones | Manually operate security areas and bypass zones; also enables Security visibility |
+| Security setup & alert actions | Configure protection, automated arm/disarm schedules and alert actions; also enables Security visibility |
 
 User administration belongs only to administrators. It cannot be delegated with
 a checkbox; selecting every feature for a non-administrator does not grant it.
@@ -170,10 +178,13 @@ the operating system's colour preference. The selected preference is stored in
 that browser and applies to the login page, health monitor, reports and dialogs;
 changing it does not change another user's browser or the monitoring settings.
 
-The Health monitor covers device and broker health. A separate security module,
-security-device areas, arming/disarming schedules and MQTT-triggered security
-actions are planned for a future release. This release does not implement them,
-and the collector continues to publish no device commands.
+The **Health monitor** covers device and broker health. **Security** is a separate
+residential-style panel for selected Zigbee devices. New areas start disarmed;
+schedules and alert actions start disabled. Administrators have full Security
+access. Existing non-administrator accounts keep their current permissions and
+receive no Security access automatically. Existing administrator passwords,
+stored permissions and remembered sessions are preserved during this upgrade.
+See [Security setup and behaviour](docs/security.md).
 
 ## Device identity and lifecycle
 
@@ -203,9 +214,11 @@ deleting a record. Retired identities and structural links survive pruning.
 ## Monitoring and email
 
 The collector subscribes to existing Zigbee2MQTT inventory, state, availability
-and events. It publishes no queries, controls, scans or MQTT will. Read-only broker
-ACLs are recommended; publish permission is unnecessary. Each broker/base-topic
-entry represents one network.
+and events. The health collector publishes no queries, controls, scans or MQTT
+will. Read-only broker ACLs are sufficient for health monitoring. If you explicitly
+enable a Security MQTT alert, its separate publisher also needs permission to
+publish to your chosen event topic. Each broker/base-topic entry represents one
+network. Security alerts do not publish device commands or bridge requests.
 
 Retained sensor messages do not establish a live baseline. Non-retained receipt
 time is not proof of a newly sampled physical measurement. Source outages suspend

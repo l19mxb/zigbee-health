@@ -154,7 +154,7 @@ test('legacy session migration discards identity-less tokens and adopts existing
 
 test('roles are permission presets while administrator permissions remain complete',()=>{
   const f=fixture();try{
-    assert.equal(permissionKeys.length,9);assert.deepEqual(f.admin.permissions,[...permissionKeys].sort());
+    assert.equal(permissionKeys.length,12);assert.deepEqual(f.admin.permissions,[...permissionKeys].sort());
     const ordinary=viewer(f),operator=f.accounts.create({username:'operator',role:'operator',password},'admin');
     assert.deepEqual(ordinary.permissions,rolePermissions.viewer);assert.deepEqual(operator.permissions,rolePermissions.operator);
     assert.equal(hasPermission(ordinary,'viewHealth'),true);assert.equal(hasPermission(ordinary,'manageBrokers'),false);
