@@ -48,13 +48,17 @@ export function renderSecurityEmail(action,context){
 
 /** Separate one-shot publisher. The health collector remains subscription-only. */
 export class SecurityActions{
-  constructor(store,{demo=false,connect=mqtt.connect,mail=message=>sendEmail(store,message),timeoutMs=12000}={}){
-    this.s=store;this.demo=demo;this.connect=connect;this.mail=mail;this.timeoutMs=timeoutMs;this.clients=new Set();this.closed=false;this.publications=0;this.accepted=0;
+  constructor(store,{demo=false,connect=mqtt.connect,mail=message=>sendEmail(store,message),push=null,timeoutMs=12000}={}){
+    this.s=store;this.demo=demo;this.connect=connect;this.mail=mail;this.push=push;this.timeoutMs=timeoutMs;this.clients=new Set();this.closed=false;this.publications=0;this.accepted=0;
   }
   stats(){return {mqttPublications:this.publications,mqttAccepted:this.accepted};}
-  async send(action,context){
+  async send(action,context,job){
     requireValue(!this.closed&&!this.demo,'Security delivery is unavailable in simulation or while stopping');
-    requireValue(action&&action.enabled===true&&['mqtt','email'].includes(action.kind),'Security action is disabled or invalid');
+    requireValue(action&&action.enabled===true&&['mqtt','email','push'].includes(action.kind),'Security action is disabled or invalid');
+    if(action.kind==='push'){
+      requireValue(this.push&&job?.id,'Security push is unavailable');
+      return this.push.sendSecurity(action,context,job.id);
+    }
     if(action.kind==='email'){
       requireValue(this.s.get('email')?.enabled===true,'Email delivery is disabled');
       const message=renderSecurityEmail(action,context);

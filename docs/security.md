@@ -89,7 +89,7 @@ a nonexistent local time is skipped. Schedules do not catch up missed actions
 after downtime or a clock jump. Review the event history when a scheduled arm
 did not complete. Display times follow the application timezone.
 
-## MQTT and email alert actions
+## MQTT, email and browser push alert actions
 
 Actions belong to an area and start disabled. When a fresh activation raises an
 intrusion, each enabled action receives one queued attempt for that incident.
@@ -118,9 +118,49 @@ acted on a message. Consumers can use `incidentId` to identify an incident.
 
 For **Email**, use the existing SMTP configuration and recipient. Set a security
 subject and message using the same placeholders. An accepted result means SMTP
-acceptance, rather than confirmed inbox delivery. Existing health email and
-health browser-push settings remain separate; this release's security outputs
-are MQTT and email.
+acceptance, rather than confirmed inbox delivery. Existing health email remains
+separate from Security actions.
+
+### Browser push
+
+1. On the phone, open the HTTPS app and **My account & app**. Enable notifications
+   for that browser. The signed-in account must be enabled and have **View
+   security areas & alarms**; Health monitor access alone cannot receive Security
+   alarms.
+2. Under **Security → Alert actions**, add an action for the area, choose
+   **Browser push**, and select one or more eligible registered browsers. New
+   actions start disabled; enable the action when ready. Existing registrations
+   and the VAPID key are reused.
+3. Use **Security preview** beside your own browser registration to check the
+   phone. This sends a clearly labelled test and creates no intrusion, arming
+   change, MQTT message or email.
+
+Each selected browser receives one attempt for the raised incident and action.
+Recipients are pinned when the incident is queued; registering a new phone does
+not retarget an old alert. Permission removal, account or browser disablement,
+removing the browser and switching global push off suppress unsent deliveries.
+Restoring access does not replay those alerts. Every recipient is checked again
+immediately before its attempt. One successful phone does not cause a failed
+phone to be retried.
+
+The shared global push switch and lock-screen privacy setting apply. By default
+the notification says a Security alarm was detected; area and zone details are
+included only when **Include device and alarm details on the lock screen** is
+enabled. Security
+uses a high-urgency push request, but the phone's notification permissions and
+system settings still control presentation. Tapping opens Security and selects
+the incident's area when it is still available. It never acknowledges, disarms
+or resets anything. Refresh the installed app after an update so it has the
+current notification handler.
+
+The Security delivery log records per-browser accepted, suppressed, expired or
+uncertain results. The parent action is accepted when at least one eligible
+browser is accepted and no attempt is uncertain or expired; its per-browser rows
+show suppressed recipients separately. Accepted means the push service accepted
+the message; check the handset to establish receipt. Acknowledgement or disarming after an intrusion
+does not cancel its already queued alert. Resetting the incident suppresses
+deliveries still queued; an attempt already in progress may finish. Security
+does not send arm/disarm or recovery notifications in this release.
 
 The publisher is separate from the subscription-only health collector. An attempt
 is recorded before sending. Ambiguous or interrupted attempts are marked

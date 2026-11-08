@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import {pushAccountActive,securityPushRecipients} from './accounts.mjs';
 
 const DAY=86400000,MINUTE=60000,MAX_PROPERTIES=128;
 const MODES=['disarmed','away','home'];
@@ -40,13 +41,18 @@ export class SecurityEngine {
       CREATE TABLE IF NOT EXISTS security_events(id INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER NOT NULL,area_id TEXT,zone_id TEXT,incident_id TEXT,type TEXT NOT NULL,actor TEXT NOT NULL,message TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS security_event_time ON security_events(at);
       CREATE TABLE IF NOT EXISTS security_deliveries(id TEXT PRIMARY KEY,incident_id TEXT NOT NULL,action_id TEXT NOT NULL,created_at INTEGER NOT NULL,status TEXT NOT NULL,error TEXT,finished_at INTEGER,action_json TEXT NOT NULL,context_json TEXT NOT NULL,UNIQUE(incident_id,action_id));
-      CREATE INDEX IF NOT EXISTS security_delivery_status ON security_deliveries(status,created_at);`);
+      CREATE INDEX IF NOT EXISTS security_delivery_status ON security_deliveries(status,created_at);
+      CREATE TABLE IF NOT EXISTS security_push_deliveries(id TEXT PRIMARY KEY,delivery_id TEXT,incident_id TEXT NOT NULL,action_id TEXT NOT NULL,subscription_id TEXT NOT NULL,owner_id TEXT,endpoint_hash TEXT NOT NULL,label TEXT NOT NULL,kind TEXT NOT NULL,created_at INTEGER NOT NULL,status TEXT NOT NULL,error TEXT,finished_at INTEGER,UNIQUE(incident_id,action_id,subscription_id));
+      CREATE INDEX IF NOT EXISTS security_push_delivery_parent ON security_push_deliveries(delivery_id,status);
+      CREATE INDEX IF NOT EXISTS security_push_delivery_owner ON security_push_deliveries(owner_id,created_at);`);
     this.s.transaction(()=>{
       // Backfill membership only. Existing detector JSON and runtime history are
       // deliberately left byte-exact when upgrading a single-area workspace.
       this.s.run('INSERT INTO security_zone_areas(zone_id,area_id) SELECT z.id,z.area_id FROM security_zones z JOIN security_areas a ON a.id=z.area_id WHERE NOT EXISTS (SELECT 1 FROM security_zone_areas m WHERE m.zone_id=z.id)');
       this.s.run("UPDATE security_deliveries SET status='uncertain',error='Service restarted during delivery. No automatic retry.',finished_at=? WHERE status='delivering'",this.now());
       this.s.run("UPDATE security_deliveries SET status='suppressed',error='Service restarted; previous queued outputs were cancelled.',finished_at=? WHERE status='queued'",this.now());
+      this.s.run("UPDATE security_push_deliveries SET status='uncertain',error='Service restarted during delivery. No automatic retry.',finished_at=? WHERE status='delivering'",this.now());
+      this.s.run("UPDATE security_push_deliveries SET status='suppressed',error='Service restarted; previous queued outputs were cancelled.',finished_at=? WHERE status='queued'",this.now());
     });
     for(const area of this.areas())if(area.targetMode){
         this._saveArea({...area,mode:'disarmed',targetMode:null,exitAt:null,entryAt:null,pendingZoneId:null,armedAt:null});
@@ -122,11 +128,16 @@ export class SecurityEngine {
   }
   removeSchedule(id,actor='System'){const schedule=parse(this.s.one('SELECT json FROM security_schedules WHERE id=?',identifier(id,'schedule'))?.json);requireValue(schedule,'Security schedule not found');this.editable(this.requireArea(schedule.areaId));this.s.transaction(()=>{this.s.run('DELETE FROM security_schedules WHERE id=?',id);this.event('schedule_removed',schedule.name+' removed',{areaId:schedule.areaId,actor});});}
   saveAction(input,actor='System'){
-    const body=object(input,['id','name','areaId','kind','enabled','networkId','topic','payloadTemplate','subject','text']);
+    const body=object(input,['id','name','areaId','kind','enabled','networkId','topic','payloadTemplate','subject','text','subscriptionIds']);
     const old=body.id?this.action(identifier(body.id,'action')):null;requireValue(!body.id||old,'Security action not found');
     const area=this.requireArea(body.areaId??old?.areaId);this.editable(area);if(old&&old.areaId!==area.id)this.editable(this.requireArea(old.areaId));
     const action={...(old||{id:uid(),createdAt:this.now()}),areaId:area.id,name:text(body.name??old?.name??'Security alert','Action name'),kind:body.kind??old?.kind??'mqtt',enabled:bool(body.enabled??old?.enabled??false,'action enabled state'),networkId:body.networkId??old?.networkId??'',topic:body.topic??old?.topic??'',payloadTemplate:body.payloadTemplate??old?.payloadTemplate??defaultSecurityPayload,subject:body.subject??old?.subject??'[Security] {{area}}',text:body.text??old?.text??'{{zone}} activated in {{area}} at {{timestamp}}. Incident: {{incidentId}}',updatedAt:this.now()};
-    requireValue(['mqtt','email'].includes(action.kind),'Choose MQTT or email');
+    requireValue(['mqtt','email','push'].includes(action.kind),'Choose MQTT, email or browser push');
+    if(action.kind==='push'){
+      const ids=body.subscriptionIds??old?.subscriptionIds??[],available=new Set(securityPushRecipients(this.s).map(sub=>sub.id));
+      requireValue(Array.isArray(ids)&&ids.length>0&&ids.length<=32&&ids.every(id=>typeof id==='string'&&id.length<=200&&available.has(id))&&new Set(ids).size===ids.length,'Choose 1–32 unique browsers with Security access enabled');
+      action.subscriptionIds=[...ids];
+    }else delete action.subscriptionIds;
     const allowed=new Set(['area','zone','device','event','timestamp','incidentId','mode']);
     for(const value of [action.payloadTemplate,action.subject,action.text]){requireValue(typeof value==='string'&&Buffer.byteLength(value,'utf8')<=8192&&!value.includes('\u0000'),'Security alert templates must be at most 8192 bytes');for(const match of value.matchAll(/\{\{([^{}]+)\}\}/g))requireValue(allowed.has(match[1]),'Unknown alert template field: '+match[1]);}
     requireValue(action.subject.trim().length>0&&action.subject.length<=200&&!/[\r\n]/.test(action.subject),'Email subject must be 1–200 characters without line breaks');
@@ -136,11 +147,12 @@ export class SecurityEngine {
     if(action.kind==='mqtt'){
       requireValue(typeof action.topic==='string'&&action.topic.length>=1&&Buffer.byteLength(action.topic,'utf8')<=255&&!/[\s+#\u0000-\u0020\u007f]/.test(action.topic)&&!action.topic.startsWith('$')&&!action.topic.startsWith('/')&&!action.topic.endsWith('/')&&!/(?:^|\/)(?:set|get)(?:\/|$)|(?:^|\/)bridge\/request(?:\/|$)/i.test(action.topic),'Choose an alert topic without wildcards, whitespace or device command paths');
       requireValue(this.s.network(action.networkId),'Choose an existing broker');if(action.enabled)requireValue(this.s.network(action.networkId)?.enabled,'Enable the selected broker before enabling this alert');
-    }else if(action.enabled)requireValue(this.s.get('email')?.enabled,'Enable SMTP email settings before enabling this alert');
+    }else if(action.kind==='email'&&action.enabled)requireValue(this.s.get('email')?.enabled,'Enable SMTP email settings before enabling this alert');
+    else if(action.kind==='push'&&action.enabled)requireValue(this.s.get('pushSettings')?.enabled,'Enable browser push delivery before enabling this alert');
     requireValue(old||this.actions().length<512,'At most 512 security actions are supported');
     this.s.transaction(()=>{this.s.run('INSERT INTO security_actions VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET area_id=excluded.area_id,json=excluded.json',action.id,action.areaId,JSON.stringify(action));this.event(old?'action_updated':'action_created',action.name+' '+(action.enabled?'enabled':'saved disabled'),{areaId:area.id,actor});});return action;
   }
-  removeAction(id,actor='System'){const action=this.action(id);requireValue(action,'Security action not found');this.editable(this.requireArea(action.areaId));this.s.transaction(()=>{this.s.run('DELETE FROM security_actions WHERE id=?',id);this.s.run("UPDATE security_deliveries SET status='suppressed',error='Action removed',finished_at=? WHERE action_id=? AND status='queued'",this.now(),id);this.event('action_removed',action.name+' removed',{areaId:action.areaId,actor});});}
+  removeAction(id,actor='System'){const action=this.action(id);requireValue(action,'Security action not found');this.editable(this.requireArea(action.areaId));this.s.transaction(()=>{this.s.run('DELETE FROM security_actions WHERE id=?',id);this.s.run("UPDATE security_deliveries SET status='suppressed',error='Action removed',finished_at=? WHERE action_id=? AND status='queued'",this.now(),id);this.s.run("UPDATE security_push_deliveries SET status='suppressed',error='Action removed',finished_at=? WHERE action_id=? AND status='queued'",this.now(),id);this.event('action_removed',action.name+' removed',{areaId:action.areaId,actor});});}
   isBypassed(zone){return zone.bypassAt!==null&&zone.bypassAt!==undefined&&(zone.bypassUntil===null||zone.bypassUntil>this.now());}
   bypassZone(id,options,actor='System'){
     const zone=this.zone(id);requireValue(zone,'Security zone not found');const body=object(options,['durationMin','reason']);
@@ -193,7 +205,7 @@ export class SecurityEngine {
     area={...area,cycleId:uid(),targetMode:area.exitDelaySec?mode:null,exitAt:area.exitDelaySec?this.now()+area.exitDelaySec*1000:null,entryAt:null,pendingZoneId:null,mode:area.exitDelaySec?'disarmed':mode,armedAt:area.exitDelaySec?null:this.now()};
     this.s.transaction(()=>{this._saveArea(area);this.event(area.exitDelaySec?'exit_started':'area_armed',area.name+(area.exitDelaySec?' exit delay started':' armed '+mode),{areaId,actor});});return this.areaView(area);
   }
-  _suppressArea(areaId,reason){this.s.run("UPDATE security_deliveries SET status='suppressed',error=?,finished_at=? WHERE status='queued' AND incident_id IN (SELECT id FROM security_incidents WHERE area_id=?)",reason,this.now(),areaId);}
+  _suppressArea(areaId,reason){this.s.run("UPDATE security_deliveries SET status='suppressed',error=?,finished_at=? WHERE status='queued' AND incident_id IN (SELECT id FROM security_incidents WHERE area_id=?)",reason,this.now(),areaId);this.s.run("UPDATE security_push_deliveries SET status='suppressed',error=?,finished_at=? WHERE status='queued' AND incident_id IN (SELECT id FROM security_incidents WHERE area_id=?)",reason,this.now(),areaId);}
   _boundProperties(deviceId,values){
     const configured=new Set(this.zones().filter(zone=>zone.deviceId===deviceId).map(zone=>zone.property));
     const entries=[...values].sort((a,b)=>Number(configured.has(b[0]))-Number(configured.has(a[0]))||b[1].at-a[1].at);
@@ -244,7 +256,13 @@ export class SecurityEngine {
       const eventId=this.event('intrusion',description,{areaId:area.id,zoneId:zone.id,incidentId:id});
       this._saveArea({...this.requireArea(area.id),entryAt:null,pendingZoneId:null});
       const context={eventId:String(eventId),incidentId:id,areaId:area.id,area:area.name,zoneId:zone.id,zone:zone.name,deviceId:zone.deviceId,device:d?.name||zone.name,networkId:d?.networkId||null,raisedAt:this.now(),timestamp:new Date(this.now()).toISOString(),mode:area.mode,event:'intrusion',type:'intrusion'};
-      if(outputs&&!this.demo)for(const action of this.actions().filter(action=>action.areaId===area.id&&action.enabled))this.s.run("INSERT OR IGNORE INTO security_deliveries VALUES(?,?,?,?,'queued',NULL,NULL,?,?)",uid(),id,action.id,this.now(),JSON.stringify(action),JSON.stringify(context));
+      if(outputs&&!this.demo)for(const action of this.actions().filter(action=>action.areaId===area.id&&action.enabled)){
+        const deliveryId=uid();this.s.run("INSERT OR IGNORE INTO security_deliveries VALUES(?,?,?,?,'queued',NULL,NULL,?,?)",deliveryId,id,action.id,this.now(),JSON.stringify(action),JSON.stringify(context));
+        if(action.kind==='push')for(const subscriptionId of action.subscriptionIds){
+          const sub=this.s.one('SELECT id,user_id,endpoint_hash,label,disabled_at FROM push_subscriptions WHERE id=?',subscriptionId),eligible=this.s.get('pushSettings')?.enabled===true&&sub&&!sub.disabled_at&&pushAccountActive(this.s,sub,'viewSecurity');
+          this.s.run('INSERT OR IGNORE INTO security_push_deliveries VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',uid(),deliveryId,id,action.id,subscriptionId,sub?.user_id||null,sub?.endpoint_hash||'',sub?.label||'Unavailable browser','alarm',this.now(),eligible?'queued':'suppressed',eligible?null:'Browser or push delivery was unavailable when the alarm was raised',eligible?null:this.now());
+        }
+      }
     });
   }
   tick(){
@@ -278,26 +296,26 @@ export class SecurityEngine {
   claimAction(id){
     if(this.demo)return null;const row=this.s.one("SELECT * FROM security_deliveries WHERE id=? AND status='queued'",identifier(id,'delivery'));if(!row)return null;
     const incident=this.s.one('SELECT * FROM security_incidents WHERE id=?',row.incident_id),action=this.action(row.action_id),area=incident&&this.area(incident.area_id);
-    if(this.now()-row.created_at>5*MINUTE){this.s.run("UPDATE security_deliveries SET status='suppressed',error='Alert expired before delivery',finished_at=? WHERE id=?",this.now(),id);return null;}
-    if(!incident||incident.reset_at||!action?.enabled||!area?.enabled||JSON.stringify(action)!==row.action_json){this.s.run("UPDATE security_deliveries SET status='suppressed',error='Alarm reset, area disabled or action changed',finished_at=? WHERE id=?",this.now(),id);return null;}
-    if(action.kind==='email'&&!this.s.get('email')?.enabled||action.kind==='mqtt'&&!this.s.network(action.networkId)?.enabled){this.s.run("UPDATE security_deliveries SET status='suppressed',error='Configured output is disabled or unavailable',finished_at=? WHERE id=?",this.now(),id);return null;}
+    if(this.now()-row.created_at>5*MINUTE){this.s.run("UPDATE security_deliveries SET status='suppressed',error='Alert expired before delivery',finished_at=? WHERE id=?",this.now(),id);this.s.run("UPDATE security_push_deliveries SET status='suppressed',error='Alert expired before delivery',finished_at=? WHERE delivery_id=? AND status='queued'",this.now(),id);return null;}
+    if(!incident||incident.reset_at||!action?.enabled||!area?.enabled||JSON.stringify(action)!==row.action_json){this.s.run("UPDATE security_deliveries SET status='suppressed',error='Alarm reset, area disabled or action changed',finished_at=? WHERE id=?",this.now(),id);this.s.run("UPDATE security_push_deliveries SET status='suppressed',error='Alarm reset, area disabled or action changed',finished_at=? WHERE delivery_id=? AND status='queued'",this.now(),id);return null;}
+    if(action.kind==='email'&&!this.s.get('email')?.enabled||action.kind==='mqtt'&&!this.s.network(action.networkId)?.enabled||action.kind==='push'&&!this.s.get('pushSettings')?.enabled){this.s.run("UPDATE security_deliveries SET status='suppressed',error='Configured output is disabled or unavailable',finished_at=? WHERE id=?",this.now(),id);this.s.run("UPDATE security_push_deliveries SET status='suppressed',error='Configured output is disabled or unavailable',finished_at=? WHERE delivery_id=? AND status='queued'",this.now(),id);return null;}
     this.s.run("UPDATE security_deliveries SET status='delivering' WHERE id=? AND status='queued'",id);return this.deliveryView({...row,status:'delivering'});
   }
-  finishAction(id,status,error=null){requireValue(['accepted','uncertain'].includes(status),'Invalid delivery result');const job=this.s.one("SELECT * FROM security_deliveries WHERE id=? AND status='delivering'",id);requireValue(job,'Delivery is not in progress');const message=status==='uncertain'?'Delivery not confirmed. No automatic retry.':null;this.s.run('UPDATE security_deliveries SET status=?,error=?,finished_at=? WHERE id=?',status,message,this.now(),id);this.event(status==='accepted'?'output_accepted':'output_uncertain',parse(job.action_json).name+': '+(status==='accepted'?'accepted':'not confirmed; no automatic retry'),{areaId:parse(job.context_json).areaId,incidentId:job.incident_id});}
+  finishAction(id,status,error=null){requireValue(['accepted','uncertain','suppressed'].includes(status),'Invalid delivery result');const job=this.s.one("SELECT * FROM security_deliveries WHERE id=? AND status='delivering'",id);requireValue(job,'Delivery is not in progress');const message=status==='uncertain'?'Delivery not confirmed. No automatic retry.':status==='suppressed'?'No eligible browser delivery remained':null;this.s.transaction(()=>{this.s.run('UPDATE security_deliveries SET status=?,error=?,finished_at=? WHERE id=?',status,message,this.now(),id);this.s.run("UPDATE security_push_deliveries SET status='suppressed',error='Parent delivery completed without another attempt',finished_at=? WHERE delivery_id=? AND status='queued'",this.now(),id);this.event(status==='accepted'?'output_accepted':status==='suppressed'?'output_suppressed':'output_uncertain',parse(job.action_json).name+': '+(status==='accepted'?'accepted':status==='suppressed'?'suppressed':'not confirmed; no automatic retry'),{areaId:parse(job.context_json).areaId,incidentId:job.incident_id});});}
   async deliver(send){
     if(this.delivering||this.demo)return;this.delivering=true;
-    try{for(const queued of this.queuedActions()){const job=this.claimAction(queued.id);if(!job)continue;try{await send(job.action,job.context);this.finishAction(job.id,'accepted');}catch{this.finishAction(job.id,'uncertain');}}}finally{this.delivering=false;}
+    try{for(const queued of this.queuedActions()){const job=this.claimAction(queued.id);if(!job)continue;try{const result=await send(job.action,job.context,job);this.finishAction(job.id,result?.status==='suppressed'?'suppressed':'accepted');}catch{this.finishAction(job.id,'uncertain');}}}finally{this.delivering=false;}
   }
   prune(){
     const days=this.s.get('thresholds')?.retentionDays||90,cutoff=this.now()-days*DAY;
-    this.s.transaction(()=>{this.s.run('DELETE FROM security_deliveries WHERE incident_id IN (SELECT id FROM security_incidents WHERE reset_at IS NOT NULL AND reset_at<?)',cutoff);this.s.run('DELETE FROM security_events WHERE at<? AND (incident_id IS NULL OR incident_id NOT IN (SELECT id FROM security_incidents WHERE reset_at IS NULL))',cutoff);this.s.run('DELETE FROM security_incidents WHERE reset_at IS NOT NULL AND reset_at<?',cutoff);});
+    this.s.transaction(()=>{this.s.run('DELETE FROM security_push_deliveries WHERE incident_id IN (SELECT id FROM security_incidents WHERE reset_at IS NOT NULL AND reset_at<?) OR (kind=\'test\' AND created_at<?)',cutoff,cutoff);this.s.run('DELETE FROM security_deliveries WHERE incident_id IN (SELECT id FROM security_incidents WHERE reset_at IS NOT NULL AND reset_at<?)',cutoff);this.s.run('DELETE FROM security_events WHERE at<? AND (incident_id IS NULL OR incident_id NOT IN (SELECT id FROM security_incidents WHERE reset_at IS NULL))',cutoff);this.s.run('DELETE FROM security_incidents WHERE reset_at IS NOT NULL AND reset_at<?',cutoff);});
   }
   state(){
     const areas=this.areas().map(area=>this.areaView(area)),zones=this.zones().map(zone=>this.zoneState(zone)),networks=this.s.networks().map(n=>({id:n.id,label:n.label,enabled:n.enabled,connected:n.connected,mode:n.mode||'zigbee2mqtt'}));
     const devices=this.s.devices().filter(d=>!d.retiredAt&&!d.disabled&&this.s.network(d.networkId)?.mode!=='mqtt').map(d=>{const {network,available}=this._source(d),record=this.readings.get(d.id),properties=record?.epoch===(network?.connectedAt||0)?[...record.values].filter(([,value])=>scalar(value.value)).map(([key,value])=>({property:key,value:value.value,type:typeof value.value})):[];return {id:d.id,name:d.name,ieee:/^0x[0-9a-f]{16}$/i.test(d.ieee)?d.ieee:'',networkId:d.networkId,networkLabel:network?.label||'Missing broker',room:d.room||'',model:d.model||'',available,properties};});
     const incidents=[...this.s.all('SELECT * FROM security_incidents WHERE reset_at IS NULL ORDER BY raised_at DESC'),...this.s.all('SELECT * FROM security_incidents WHERE reset_at IS NOT NULL ORDER BY raised_at DESC LIMIT 200')].map(row=>this.incidentView(row));
     const events=this.s.all('SELECT * FROM security_events ORDER BY at DESC,id DESC LIMIT 200').map(row=>({id:row.id,at:row.at,areaId:row.area_id,zoneId:row.zone_id,incidentId:row.incident_id,type:row.type,actor:row.actor,message:row.message}));
-    const deliveries=this.s.all('SELECT * FROM security_deliveries ORDER BY created_at DESC,id DESC LIMIT 100').map(row=>{const job=this.deliveryView(row);return {...job,action:undefined,context:undefined,name:job.action.name,kind:job.action.kind,areaId:job.context.areaId};});
-    return {now:this.now(),at:this.now(),timezone:this.timezone,demo:this.demo,areas,zones,schedules:this.schedules(),actions:this.actions(),incidents,events,deliveries,devices,candidates:devices,networks,summary:{areas:areas.length,armed:areas.filter(a=>a.mode!=='disarmed').length,alarms:incidents.filter(i=>!i.resetAt).length,unacknowledged:incidents.filter(i=>!i.resetAt&&!i.ackAt).length,trouble:zones.filter(z=>z.enabled&&['unknown','trouble'].includes(z.status)).length,bypassed:zones.filter(z=>z.status==='bypassed').length}};
+    const deliveries=this.s.all('SELECT * FROM security_deliveries ORDER BY created_at DESC,id DESC LIMIT 100').map(row=>{const job=this.deliveryView(row),results=job.action.kind==='push'?this.s.all('SELECT id,label,status,error,created_at AS createdAt,finished_at AS finishedAt FROM security_push_deliveries WHERE delivery_id=? ORDER BY created_at,id',job.id):undefined;return {...job,action:undefined,context:undefined,name:job.action.name,kind:job.action.kind,areaId:job.context.areaId,...(results?{results}:{})};});
+    return {now:this.now(),at:this.now(),timezone:this.timezone,demo:this.demo,areas,zones,schedules:this.schedules(),actions:this.actions(),incidents,events,deliveries,devices,candidates:devices,networks,securityPushRecipients:securityPushRecipients(this.s),securityPushSettings:{enabled:this.s.get('pushSettings')?.enabled===true,includeDeviceNames:this.s.get('pushSettings')?.includeDeviceNames===true},summary:{areas:areas.length,armed:areas.filter(a=>a.mode!=='disarmed').length,alarms:incidents.filter(i=>!i.resetAt).length,unacknowledged:incidents.filter(i=>!i.resetAt&&!i.ackAt).length,trouble:zones.filter(z=>z.enabled&&['unknown','trouble'].includes(z.status)).length,bypassed:zones.filter(z=>z.status==='bypassed').length}};
   }
 }

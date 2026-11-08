@@ -14,6 +14,7 @@ const adminChanges=new Set(['/api/users','/api/users/update','/api/users/reset-p
 const routeFeatures=new Map([['/api/thresholds','manageThresholds'],['/api/device','manageDevices'],['/api/networks','manageBrokers'],['/api/email','manageEmail'],['/api/push/settings','manageNotifications'],...['retire','restore','delete-history','link','unlink'].map(action=>['/api/devices/'+action,'manageDevices']),['/api/alarms/acknowledge','acknowledge'],['/api/alarms/process','acknowledge'],['/api/shunts','manageShunts'],['/api/shunts/cancel','manageShunts']]);
 for(const route of ['areas','zones','schedules','actions','remove-area','remove-zone','remove-schedule','remove-action','areas/delete','zones/delete','schedules/delete','actions/delete'])routeFeatures.set('/api/security/'+route,'manageSecurity');
 for(const route of ['command','bypass','clear-bypass','zones/bypass','zones/clear-bypass'])routeFeatures.set('/api/security/'+route,'controlSecurity');
+routeFeatures.set('/api/security/push-test','viewSecurity');
 const personalChanges=new Set(['/api/logout','/api/account/password','/api/push/subscribe','/api/push/remove','/api/push/test']);
 const permissionsFor=user=>({...Object.fromEntries(permissionKeys.map(key=>[key,hasPermission(user,key)])),configure:['manageBrokers','manageThresholds','manageEmail','manageNotifications'].some(key=>hasPermission(user,key)),manageUsers:user.role==='admin',operateAlarms:hasPermission(user,'acknowledge')});
 
@@ -77,10 +78,11 @@ export function createApp(engine,{collectors=null,push=null,security=null,securi
         state.devices=(state.devices||engine.s.devices()).map(({id,name,networkId,networkLabel,ieee,model,room,available,properties,retiredAt,disabled,inventoryPresent,power})=>({id,name,networkId,networkLabel,ieee,model,room,available,properties:Array.isArray(properties)?properties.slice(0,32).map(({property,type})=>({property,type})):[],retiredAt,disabled,inventoryPresent,power}));
         // Keep one bounded candidate inventory; zone values have their own DTO.
         delete state.candidates;delete state.eligibleDevices;
-        if(!permissions.manageSecurity){state.actions=[];state.schedules=[];state.deliveries=(state.deliveries||[]).map(({id,incidentId,status,kind,error,createdAt,finishedAt})=>({id,incidentId,status,kind,error,createdAt,finishedAt}));}
+        if(!permissions.manageSecurity){state.actions=[];state.schedules=[];state.deliveries=(state.deliveries||[]).map(({id,incidentId,status,kind,error,createdAt,finishedAt})=>({id,incidentId,status,kind,error,createdAt,finishedAt}));delete state.securityPushRecipients;delete state.securityPushSettings;}
         return json(res,200,{...state,currentUser:user,permissions});
       }
       if(route==='/api/security/command'&&req.method==='POST')return json(res,200,{ok:true,area:security.command(body.areaId,body.action,{reason:body.reason},actor)});
+      if(route==='/api/security/push-test'&&req.method==='POST')return json(res,200,await push.securityTest(body.subscriptionId,accounts.active()?user.id:null));
       if(['/api/security/bypass','/api/security/zones/bypass'].includes(route)&&req.method==='POST')return json(res,200,{ok:true,zone:security.bypassZone(body.id,{durationMin:body.durationMin,reason:body.reason},actor)});
       if(['/api/security/clear-bypass','/api/security/zones/clear-bypass'].includes(route)&&req.method==='POST')return json(res,200,{ok:true,zone:security.clearBypass(body.id,actor)});
       const securitySaves={'/api/security/areas':['saveArea','area'],'/api/security/zones':['saveZone','zone'],'/api/security/schedules':['saveSchedule','schedule'],'/api/security/actions':['saveAction','action']};
@@ -101,12 +103,12 @@ export function createApp(engine,{collectors=null,push=null,security=null,securi
       if(route==='/api/push'&&req.method==='GET')return json(res,200,push.status(accounts.active()?user.id:null,admin));
       if(route==='/api/push/settings'&&req.method==='POST'){push.configure(body,actor);return json(res,200,{ok:true});}
       if(route==='/api/push/subscribe'&&req.method==='POST'){
-        if(!permissions.viewHealth)return json(res,403,{error:'Health monitor access is required for browser notifications'});
+        if(!permissions.viewHealth&&!permissions.viewSecurity)return json(res,403,{error:'Health monitor or Security access is required for browser notifications'});
         const origin=engine.s.get('web')?.publicOrigin;if(!origin||req.headers.origin!==origin)throw Error('Enable browser notifications from the configured HTTPS app address');
         return json(res,201,push.subscribe(body.subscription,body.label,actor,accounts.active()?user.id:null));
       }
       if(route==='/api/push/remove'&&req.method==='POST'){push.remove(body.id,actor,accounts.active()?user.id:null,admin);return json(res,200,{ok:true});}
-      if(route==='/api/push/test'&&req.method==='POST'){if(!permissions.viewHealth)return json(res,403,{error:'Health monitor access is required for browser notifications'});return json(res,200,await push.test(body.id,accounts.active()?user.id:null,admin));}
+      if(route==='/api/push/test'&&req.method==='POST'){if(!permissions.viewHealth&&!permissions.viewSecurity)return json(res,403,{error:'Health monitor or Security access is required for browser notifications'});return json(res,200,await push.test(body.id,accounts.active()?user.id:null,admin));}
       if(route==='/api/network-log'&&req.method==='GET'){
         const id=url.searchParams.get('network');if(!engine.s.network(id))throw Error('Network not found');
         return json(res,200,{entries:collectors?.logs?.read(id)||[],limit:200,persistent:false});

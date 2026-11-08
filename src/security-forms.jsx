@@ -13,11 +13,26 @@ const initial=(kind,item,state,areaId)=>{
   if(kind==='area')return {name:'',entryDelaySec:30,exitDelaySec:45,enabled:true,...item};
   if(kind==='zone')return {name:'',deviceId:'',property:'contact',operator:'eq',value:false,type:'instant',homeBypass:false,enabled:true,freshnessMin:1500,...item,areaIds:item?memberIds(item):[areaId||state.areas.find(editableArea)?.id].filter(Boolean)};
   if(kind==='schedule')return {name:'',areaId:areaId||state.areas[0]?.id||'',days:[1,2,3,4,5],time:'22:00',timezone:state.timezone||'UTC',mode:'away',enabled:false,...item};
-  return {name:'',areaId:areaId||state.areas[0]?.id||'',kind:'mqtt',networkId:state.networks[0]?.id||'',topic:'security/alerts',payloadTemplate:payloadExample,subject:'Security alarm: {{area}}',text:'Security alarm in {{area}}.\nZone: {{zone}}\nDevice: {{device}}\nMode: {{mode}}\nTime: {{timestamp}}',enabled:false,...item};
+  return {name:'',areaId:areaId||state.areas[0]?.id||'',kind:'mqtt',networkId:state.networks[0]?.id||'',topic:'security/alerts',payloadTemplate:payloadExample,subject:'Security alarm: {{area}}',text:'Security alarm in {{area}}.\nZone: {{zone}}\nDevice: {{device}}\nMode: {{mode}}\nTime: {{timestamp}}',subscriptionIds:[],enabled:false,...item};
 };
-const fieldsFor={area:['id','name','entryDelaySec','exitDelaySec','enabled'],zone:['id','name','areaIds','deviceId','property','operator','value','type','homeBypass','enabled','freshnessMin'],schedule:['id','name','areaId','days','time','timezone','mode','enabled'],action:['id','name','areaId','kind','networkId','topic','payloadTemplate','subject','text','enabled']};
+const fieldsFor={area:['id','name','entryDelaySec','exitDelaySec','enabled'],zone:['id','name','areaIds','deviceId','property','operator','value','type','homeBypass','enabled','freshnessMin'],schedule:['id','name','areaId','days','time','timezone','mode','enabled'],action:['id','name','areaId','kind','networkId','topic','payloadTemplate','subject','text','subscriptionIds','enabled']};
 function AreaSelect({draft,change,state}){return <Field label="Area"><select required value={draft.areaId} onChange={e=>change('areaId',e.target.value)}><option value="" disabled>Choose an area</option>{state.areas.map(area=><option value={area.id} key={area.id} disabled={area.mode!=='disarmed'||['exit_delay','entry_delay'].includes(area.status)}>{area.name}{area.mode!=='disarmed'?' · armed':''}</option>)}</select></Field>;}
 function Check({children,checked,onChange,disabled=false}){return <label className="checkbox-field"><input type="checkbox" checked={checked} disabled={disabled} onChange={e=>onChange(e.target.checked)}/>{children}</label>;}
+
+function PushRecipients({draft,change,state,onAccount}){
+  const recipients=state.securityPushRecipients||[],selected=draft.subscriptionIds||[];
+  const unavailable=selected.filter(id=>!recipients.some(recipient=>recipient.id===id));
+  const toggle=(id,checked)=>change('subscriptionIds',checked?[...selected,id]:selected.filter(value=>value!==id));
+  return <fieldset className="security-push-recipients"><legend>Registered browsers</legend>
+    <p>Select the phones or browsers that should receive alarms from this area. Only enabled registrations with security view access appear here.</p>
+    {recipients.length?<div className="security-push-recipient-list">{recipients.map(recipient=><Check key={recipient.id} checked={selected.includes(recipient.id)} onChange={checked=>toggle(recipient.id,checked)}>{recipient.label}</Check>)}</div>:<p className="notice">No eligible browsers are registered yet. On each phone, open My account &amp; app and enable notifications, then return here to select it.</p>}
+    {unavailable.map((id,index)=><Check key={id} checked onChange={()=>toggle(id,false)}>Unavailable browser {index+1}<span className="small muted"> · remove this selection before saving</span></Check>)}
+    {onAccount?<button type="button" onClick={onAccount}>Open My account &amp; app</button>:null}
+    <p className="small muted">Choose up to 32 browsers. Enabling notifications on a phone does not automatically add it to security alert actions.</p>
+    {state.securityPushSettings?.enabled===false?<p className="notice warning">Global browser push delivery is disabled. An administrator must enable it under App &amp; notifications before these alerts can be sent.</p>:null}
+    <p className="security-push-privacy">{state.securityPushSettings?.includeDeviceNames===true?'Lock-screen notifications include area, zone and device details. An administrator can turn this off in the global privacy setting.':state.securityPushSettings?.includeDeviceNames===false?'Lock-screen notifications use a generic security alarm message. Area, zone and device details stay inside the app.':'Lock-screen text follows the global notification privacy setting. Names appear only when that setting allows them.'}</p>
+  </fieldset>;
+}
 
 function AreaMemberships({draft,change,state,locked}){
   return <fieldset className="security-membership-fieldset" aria-describedby="security-membership-help"><legend>Areas</legend><p id="security-membership-help">Select one or more areas this zone protects.</p><div className="security-membership-options">{state.areas.map(area=><label className="checkbox-field" key={area.id}><input type="checkbox" aria-label={'Include area '+area.name} checked={draft.areaIds.includes(area.id)} disabled={locked||!editableArea(area)} onChange={event=>change('areaIds',event.target.checked?[...draft.areaIds,area.id]:draft.areaIds.filter(id=>id!==area.id))}/><span>{area.name}<small>{editableArea(area)?'Disarmed':area.mode==='disarmed'?'Arming':'Armed · disarm to change'}</small></span></label>)}</div><p className="small muted">{locked?'Reset this zone’s alarm memory before changing its area membership.':'Every linked area must be disarmed before this zone can be changed.'}</p>{draft.areaIds.length>1?<p className="security-shared-warning">Shared zone: activation, zone type, Home-mode bypass and manual bypass apply to every linked area. Each area arms and raises alarms independently.</p>:null}</fieldset>;
@@ -42,7 +57,7 @@ function DevicePicker({devices,selectedId,fallback,onChange}){
   </div>;
 }
 
-export function SecurityForm({kind,item,state,areaId,onClose,onSave}){
+export function SecurityForm({kind,item,state,areaId,onClose,onSave,onAccount}){
   const [draft,setDraft]=useState(()=>initial(kind,item,state,areaId));
   const [preset,setPreset]=useState(()=>kind==='zone'?(item?zonePreset(item):'contact'):'custom');
   const [valueType,setValueType]=useState(()=>typeof(item?.value??false));
@@ -69,6 +84,11 @@ export function SecurityForm({kind,item,state,areaId,onClose,onSave}){
     if(kind==='action'&&body.kind==='mqtt'){
       if(!body.topic.trim()||/[+#\u0000-\u0020\u007f]/.test(body.topic)||body.topic.length>255||body.topic.startsWith('$')||body.topic.startsWith('/')||body.topic.endsWith('/')||/(^|\/)(set|get)(\/|$)|(^|\/)bridge\/request(\/|$)/i.test(body.topic)){setError('Choose a security event topic without whitespace, wildcards or device command paths.');return;}
       try{const payload=JSON.parse(body.payloadTemplate);if(!payload||Array.isArray(payload)||typeof payload!=='object')throw Error();}catch{setError('The MQTT payload must be a valid JSON object.');return;}
+    }
+    if(kind==='action'&&body.kind==='push'){
+      if(!body.subscriptionIds?.length){setError('Select at least one registered browser.');return;}
+      if(body.subscriptionIds.length>32){setError('Choose no more than 32 registered browsers.');return;}
+      if(body.subscriptionIds.some(id=>!(state.securityPushRecipients||[]).some(recipient=>recipient.id===id))){setError('Remove unavailable browsers and select a current registration before saving.');return;}
     }
     setBusy(true);
     try{await onSave('security/'+({area:'areas',zone:'zones',schedule:'schedules',action:'actions'}[kind]),body);}
@@ -105,17 +125,17 @@ export function SecurityForm({kind,item,state,areaId,onClose,onSave}){
       <p className="security-form-footnote">A schedule runs at its next matching time. Missed times are not replayed. Arming still requires the area's zones to be ready.</p>
     </>:null}
     {kind==='action'?<>
-      <Field label="Send alert by"><select value={draft.kind} onChange={e=>change('kind',e.target.value)}><option value="mqtt">MQTT event</option><option value="email">Email</option></select></Field>
+      <Field label="Send alert by"><select value={draft.kind} onChange={e=>change('kind',e.target.value)}><option value="mqtt">MQTT event</option><option value="email">Email</option><option value="push">Browser push</option></select></Field>
       {draft.kind==='mqtt'?<>
         <Field label="MQTT broker"><select required value={draft.networkId} onChange={e=>change('networkId',e.target.value)}><option value="" disabled>Choose a configured broker</option>{state.networks.map(network=><option value={network.id} key={network.id}>{network.label}{!network.enabled?' · disabled':''}</option>)}</select></Field>
         <Field label="Event topic" required maxLength={255} value={draft.topic} onChange={e=>change('topic',e.target.value)} hint="Publish security events here. Device command topics and MQTT wildcards are not accepted."/>
         <Field label="JSON payload"><textarea className="security-json" required rows={7} maxLength={8000} spellCheck={false} value={draft.payloadTemplate} onChange={e=>change('payloadTemplate',e.target.value)}/></Field>
-      </>:<>
+      </>:draft.kind==='email'?<>
         <p className="notice">Uses the existing SMTP server, sender and recipient configured under Email settings.</p>
         <Field label="Email subject" required maxLength={200} value={draft.subject} onChange={e=>change('subject',e.target.value)}/>
         <Field label="Email message"><textarea required rows={5} maxLength={8000} value={draft.text} onChange={e=>change('text',e.target.value)}/></Field>
-      </>}
-      <p className="small muted security-template-help">Available values: {'{{area}}'}, {'{{zone}}'}, {'{{device}}'}, {'{{mode}}'}, {'{{timestamp}}'}, {'{{incidentId}}'}.</p>
+      </>:<PushRecipients draft={draft} change={change} state={state} onAccount={onAccount}/>}
+      {draft.kind!=='push'?<p className="small muted security-template-help">Available values: {'{{area}}'}, {'{{zone}}'}, {'{{device}}'}, {'{{mode}}'}, {'{{timestamp}}'}, {'{{incidentId}}'}.</p>:null}
       <Check checked={draft.enabled} onChange={value=>change('enabled',value)}>Alert action enabled</Check>
       <p className="security-form-footnote">Sends when a zone activates in this armed area. New actions start disabled. Delivery failures are recorded without an automatic resend.</p>
     </>:null}

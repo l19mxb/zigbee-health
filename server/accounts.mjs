@@ -13,6 +13,16 @@ const normalizePermissions=(value,access)=>{
   return result.sort();
 };
 export const hasPermission=(user,key)=>!!user?.enabled&&permissionKeys.includes(key)&&(user.role==='admin'||Array.isArray(user.permissions)&&user.permissions.includes(key));
+// A registration can serve either feature, while each delivery must still check
+// the specific feature that owns its alarm. Security never uses unowned legacy
+// registrations; account migration assigns these before live hosting is enabled.
+export const pushAccountActive=(store,sub,feature=null)=>{
+  if(!sub?.user_id)return feature!=='viewSecurity'&&!store.get('accountsInitialised');
+  const owner=store.one('SELECT role,enabled,permissions FROM users WHERE id=? AND enabled=1',sub.user_id);
+  if(!owner)return false;let permissions;try{permissions=JSON.parse(owner.permissions);}catch{return false;}
+  const user={...owner,permissions};return feature?hasPermission(user,feature):hasPermission(user,'viewHealth')||hasPermission(user,'viewSecurity');
+};
+export const securityPushRecipients=store=>store.all('SELECT id,label,user_id,disabled_at FROM push_subscriptions WHERE disabled_at IS NULL ORDER BY created_at,id').filter(sub=>pushAccountActive(store,sub,'viewSecurity')).map(({id,label})=>({id,label}));
 const PASSWORD_OPTIONS={N:32768,r:8,p:3,maxmem:64*1024*1024};
 // Administrator is a fixed full-access role. Project new features without rewriting
 // existing account rows or invalidating remembered sessions during an app update.
@@ -89,11 +99,16 @@ export class Accounts{
       if(old.enabled&&old.role==='admin'&&(!enabled||access!=='admin')&&this.s.one("SELECT count(*) n FROM users WHERE role='admin' AND enabled=1").n<=1)throw Error('Keep at least one enabled administrator');
       this.s.run('UPDATE users SET display_name=?,role=?,permissions=?,enabled=?,updated_at=? WHERE id=?',label,access,JSON.stringify(permissions),enabled?1:0,this.clock(),old.id);
       if(old.role!==access||!!old.enabled!==enabled||permissionsChanged)this.invalidate(old.id);
-      if(!enabled||oldPermissions.includes('viewHealth')&&!permissions.includes('viewHealth')){
-        const reason=!enabled?'Account disabled':'Health access removed';
+      const next={role:access,enabled,permissions},lostHealth=hasPermission({...old,permissions:oldPermissions},'viewHealth')&&!hasPermission(next,'viewHealth'),lostSecurity=hasPermission({...old,permissions:oldPermissions},'viewSecurity')&&!hasPermission(next,'viewSecurity');
+      if(!enabled||!hasPermission(next,'viewHealth')&&!hasPermission(next,'viewSecurity')){
+        const reason=!enabled?'Account disabled':lostHealth&&!lostSecurity?'Health access removed':lostSecurity&&!lostHealth?'Security access removed':'Notification access removed';
         this.s.run('UPDATE push_subscriptions SET disabled_at=coalesce(disabled_at,?),last_error=? WHERE user_id=?',this.clock(),reason,old.id);
+      }
+      if(!enabled||lostHealth){
+        const reason=!enabled?'Account disabled':'Health access removed';
         this.s.run("UPDATE push_outbox SET status='suppressed',error=?,finished_at=? WHERE status='queued' AND subscription_id IN (SELECT id FROM push_subscriptions WHERE user_id=?)",reason,this.clock(),old.id);
       }
+      if((!enabled||lostSecurity)&&this.s.one("SELECT name FROM sqlite_master WHERE type='table' AND name='security_push_deliveries'"))this.s.run("UPDATE security_push_deliveries SET status='suppressed',error=?,finished_at=? WHERE status='queued' AND owner_id=?",!enabled?'Account disabled':'Security access removed',this.clock(),old.id);
       this.s.event('user_updated','User '+old.username+' updated ('+access+', '+(enabled?'enabled':'disabled')+')',{actor,at:this.clock()});
       if(permissionsChanged)this.s.event('permissions_changed','Feature permissions updated for '+old.username+': '+(permissions.join(', ')||'none'),{actor,at:this.clock()});
       return this.get(old.id);

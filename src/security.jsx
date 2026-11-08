@@ -7,6 +7,7 @@ import './security.css';
 
 const tabs=[['overview','Overview'],['zones','Zones'],['schedules','Schedules'],['actions','Alert actions']];
 const modeName={disarmed:'Disarmed',home:'Armed Home',away:'Armed Away'};
+const deliveryName={mqtt:'MQTT event',email:'Email',push:'Browser push'};
 const days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const canConfigure=area=>area?.mode==='disarmed'&&!['exit_delay','entry_delay'].includes(area.status);
 const membershipIds=zone=>Array.isArray(zone.areaIds)&&zone.areaIds.length?zone.areaIds:zone.areaId?[zone.areaId]:[];
@@ -27,9 +28,9 @@ function PanelHeading({title,count,children}){return <header className="security
 function SearchBox({label,table}){return <label className="search compact"><Icon name="search"/><input aria-label={label} placeholder={label+'…'} value={table.search} onChange={event=>table.setSearch(event.target.value)}/></label>;}
 function EmptyPanel({title,children,action}){return <div className="security-empty"><Icon name="shield" size={34}/><h3>{title}</h3><p>{children}</p>{action}</div>;}
 
-export default function Security({permissions={},demo=false}){
+export default function Security({permissions={},demo=false,onAccount,openIncidentId,openRequestKey=0}){
   const [state,setState]=useState(null),[error,setError]=useState(''),[loading,setLoading]=useState(true),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[tab,setTab]=useState('overview'),[areaId,setAreaId]=useState(''),[dialog,setDialog]=useState(null),[clock,setClock]=useState(Date.now());
-  const active=useRef(null),received=useRef(Date.now());
+  const active=useRef(null),received=useRef(Date.now()),openedIncident=useRef(null),openRefresh=useRef(null);
   async function refresh(){
     active.current?.abort();const controller=new AbortController();active.current=controller;
     try{const value=await request('security',undefined,controller.signal);received.current=Date.now();setState(value);setError('');}
@@ -37,6 +38,18 @@ export default function Security({permissions={},demo=false}){
     finally{if(!controller.signal.aborted)setLoading(false);}
   }
   useEffect(()=>{void refresh();const interval=setInterval(()=>void refresh(),5000);const seconds=setInterval(()=>setClock(Date.now()),1000);return()=>{clearInterval(interval);clearInterval(seconds);active.current?.abort();};},[]);
+  useEffect(()=>{
+    if(!state||openIncidentId===undefined||openedIncident.current?.id===openIncidentId&&openedIncident.current?.key===openRequestKey)return;
+    setTab('overview');setDialog(null);
+    const incident=(state.incidents||[]).find(item=>item.id===openIncidentId);
+    if(openIncidentId&&!incident&&(openRefresh.current?.id!==openIncidentId||openRefresh.current?.key!==openRequestKey)){
+      openRefresh.current={id:openIncidentId,key:openRequestKey};void refresh();return;
+    }
+    openedIncident.current={id:openIncidentId,key:openRequestKey};
+    if(!openIncidentId)return;
+    if(incident&&(state.areas||[]).some(area=>area.id===incident.areaId))setAreaId(incident.areaId);
+    else setMessage('The requested security alarm is no longer in the available history. Showing the current overview.');
+  },[state,openIncidentId,openRequestKey]);
   async function save(route,body){
     if(error)throw Error('Reconnect to security before applying this change.');
     setBusy(true);setMessage('');
@@ -66,7 +79,7 @@ export default function Security({permissions={},demo=false}){
       <RecentActivity state={safeState} areas={currentAreas}/>
     </>:tab==='zones'?<Zones state={safeState} manage={manage&&!busy&&!error} control={control&&!busy&&!error} onAdd={()=>openForm('zone')} onEdit={item=>openForm('zone',item)} onRemove={item=>setDialog({type:'remove',kind:'zone',item})} onBypass={(item,clear)=>setDialog({type:'bypass',item,clear})}/>:tab==='schedules'?<Schedules state={safeState} manage={manage&&!busy&&!error} onAdd={()=>openForm('schedule')} onEdit={item=>openForm('schedule',item)} onRemove={item=>setDialog({type:'remove',kind:'schedule',item})}/>:<AlertActions state={safeState} manage={manage&&!busy&&!error} onAdd={()=>openForm('action')} onEdit={item=>openForm('action',item)} onRemove={item=>setDialog({type:'remove',kind:'action',item})}/>}
     {demo?<p className="security-demo-note"><Icon name="flask" size={15}/>Simulation only. Security actions do not publish MQTT messages or send email.</p>:null}
-    {dialog?.type==='form'?<SecurityForm key={dialog.kind+(dialog.item?.id||'new')} kind={dialog.kind} item={dialog.item} state={safeState} areaId={selected&&canConfigure(selected)?selected.id:areas.find(canConfigure)?.id} onClose={()=>setDialog(null)} onSave={save}/>:dialog?.type==='command'?<SecurityCommandDialog area={areas.find(area=>area.id===dialog.area.id)||dialog.area} action={dialog.action} zones={zonesForArea(zones,dialog.area.id)} onClose={()=>setDialog(null)} onSave={save}/>:dialog?.type==='bypass'?<SecurityBypassDialog zone={dialog.item} clear={dialog.clear} onClose={()=>setDialog(null)} onSave={save}/>:dialog?.type==='remove'?<SecurityRemoveDialog kind={dialog.kind} item={dialog.item} onClose={()=>setDialog(null)} onSave={save}/>:null}
+    {dialog?.type==='form'?<SecurityForm key={dialog.kind+(dialog.item?.id||'new')} kind={dialog.kind} item={dialog.item} state={safeState} areaId={selected&&canConfigure(selected)?selected.id:areas.find(canConfigure)?.id} onClose={()=>setDialog(null)} onSave={save} onAccount={onAccount}/>:dialog?.type==='command'?<SecurityCommandDialog area={areas.find(area=>area.id===dialog.area.id)||dialog.area} action={dialog.action} zones={zonesForArea(zones,dialog.area.id)} onClose={()=>setDialog(null)} onSave={save}/>:dialog?.type==='bypass'?<SecurityBypassDialog zone={dialog.item} clear={dialog.clear} onClose={()=>setDialog(null)} onSave={save}/>:dialog?.type==='remove'?<SecurityRemoveDialog kind={dialog.kind} item={dialog.item} onClose={()=>setDialog(null)} onSave={save}/>:null}
   </div>;
 }
 
@@ -139,12 +152,17 @@ function Schedules({state,manage,onAdd,onEdit,onRemove}){
 }
 
 function AlertActions({state,manage,onAdd,onEdit,onRemove}){
-  const areas=new Map(state.areas.map(area=>[area.id,area])),networks=new Map(state.networks.map(network=>[network.id,network]));
-  const table=useTable(state.actions.map(action=>({...action,areaName:areas.get(action.areaId)?.name||'Removed area',networkLabel:[areas.get(action.areaId)?.name,action.kind,action.topic].join(' ')})));
+  const areas=new Map(state.areas.map(area=>[area.id,area])),networks=new Map(state.networks.map(network=>[network.id,network])),recipients=new Map((state.securityPushRecipients||[]).map(recipient=>[recipient.id,recipient.label]));
+  const table=useTable(state.actions.map(action=>({...action,areaName:areas.get(action.areaId)?.name||'Removed area',networkLabel:[areas.get(action.areaId)?.name,deliveryName[action.kind],action.topic,...(action.subscriptionIds||[]).map(id=>recipients.get(id))].join(' ')})));
   return <>
-    <section className="security-section" aria-label="Security alert actions"><PanelHeading title="Alert actions" count={state.actions.length}><div className="security-table-tools"><SearchBox label="Search alert actions" table={table}/>{manage?<button className="primary" disabled={!state.areas.some(canConfigure)} onClick={onAdd}>+ Add alert action</button>:null}</div></PanelHeading><p className="security-section-intro">Send an MQTT event or an email when a zone activates in an armed area. Actions are separate from health notifications.</p>
-      {table.filtered.length?<><div className="table-scroll security-table"><table><thead><tr><SortHead column="name" table={table}>Action</SortHead><SortHead column="areaName" table={table}>Area</SortHead><SortHead column="kind" table={table}>Delivery</SortHead><th>Destination</th><SortHead column="enabled" table={table}>Status</SortHead><th>Actions</th></tr></thead><tbody>{table.rows.map(action=><tr key={action.id}><td><strong>{action.name}</strong></td><td>{action.areaName}</td><td>{action.kind==='mqtt'?'MQTT event':'Email'}</td><td>{action.kind==='mqtt'?<>{networks.get(action.networkId)?.label||'Configured broker'}<span className="row-subtitle monospace">{action.topic}</span></>:'Existing SMTP settings'}</td><td><Badge tone={action.enabled?'healthy':'neutral'}>{action.enabled?'Enabled':'Disabled'}</Badge></td><td>{manage?<div className="record-actions"><button aria-label={'Edit alert action '+action.name} disabled={!canConfigure(areas.get(action.areaId))} onClick={()=>onEdit(action)}>Edit</button><button aria-label={'Remove alert action '+action.name} disabled={!canConfigure(areas.get(action.areaId))} onClick={()=>onRemove(action)}>Remove</button></div>:<span className="muted">Read only</span>}</td></tr>)}</tbody></table></div><Pagination total={table.filtered.length} {...table}/></>:<p className="security-table-empty">{table.search?'No alert actions match this search.':'No alert actions configured. New actions start disabled.'}</p>}
+    <section className="security-section" aria-label="Security alert actions"><PanelHeading title="Alert actions" count={state.actions.length}><div className="security-table-tools"><SearchBox label="Search alert actions" table={table}/>{manage?<button className="primary" disabled={!state.areas.some(canConfigure)} onClick={onAdd}>+ Add alert action</button>:null}</div></PanelHeading><p className="security-section-intro">Send an MQTT event, email or browser push when a zone activates in an armed area. Security alerts use the actions configured here, separately from health notifications.</p>
+      {table.filtered.length?<><div className="table-scroll security-table"><table><thead><tr><SortHead column="name" table={table}>Action</SortHead><SortHead column="areaName" table={table}>Area</SortHead><SortHead column="kind" table={table}>Delivery</SortHead><th>Destination</th><SortHead column="enabled" table={table}>Status</SortHead><th>Actions</th></tr></thead><tbody>{table.rows.map(action=><tr key={action.id}><td><strong>{action.name}</strong></td><td>{action.areaName}</td><td>{deliveryName[action.kind]||action.kind}</td><td>{action.kind==='mqtt'?<>{networks.get(action.networkId)?.label||'Configured broker'}<span className="row-subtitle monospace">{action.topic}</span></>:action.kind==='push'?<PushDestination action={action} recipients={recipients}/>:action.kind==='email'?'Existing SMTP settings':'—'}</td><td><Badge tone={action.enabled?'healthy':'neutral'}>{action.enabled?'Enabled':'Disabled'}</Badge></td><td>{manage?<div className="record-actions"><button aria-label={'Edit alert action '+action.name} disabled={!canConfigure(areas.get(action.areaId))} onClick={()=>onEdit(action)}>Edit</button><button aria-label={'Remove alert action '+action.name} disabled={!canConfigure(areas.get(action.areaId))} onClick={()=>onRemove(action)}>Remove</button></div>:<span className="muted">Read only</span>}</td></tr>)}</tbody></table></div><Pagination total={table.filtered.length} {...table}/></>:<p className="security-table-empty">{table.search?'No alert actions match this search.':'No alert actions configured. New actions start disabled.'}</p>}
     </section>
-    {state.deliveries.length?<section className="security-section" aria-label="Security delivery log"><PanelHeading title="Delivery log"/><div className="table-scroll security-table"><table><thead><tr><th>Time</th><th>Action</th><th>Result</th><th>Details</th></tr></thead><tbody>{state.deliveries.slice(0,20).map(delivery=><tr key={delivery.id}><td>{date(delivery.createdAt||delivery.at,true)}</td><td>{delivery.name||delivery.actionName||delivery.kind||'Security alert'}</td><td><Badge tone={['accepted','sent','delivered'].includes(delivery.status)?'healthy':['uncertain','failed'].includes(delivery.status)?'warning':'neutral'}>{delivery.status}</Badge></td><td>{delivery.error||delivery.detail||'—'}</td></tr>)}</tbody></table></div></section>:null}
+    {state.deliveries.length?<section className="security-section" aria-label="Security delivery log"><PanelHeading title="Delivery log"/><div className="table-scroll security-table"><table><thead><tr><th>Time</th><th>Action</th><th>Result</th><th>Details</th></tr></thead><tbody>{state.deliveries.slice(0,20).map(delivery=><tr key={delivery.id}><td>{date(delivery.createdAt||delivery.at,true)}</td><td>{delivery.name||delivery.actionName||delivery.kind||'Security alert'}</td><td><Badge tone={['accepted','sent','delivered'].includes(delivery.status)?'healthy':['uncertain','failed'].includes(delivery.status)?'warning':'neutral'}>{delivery.status}</Badge></td><td>{delivery.results?.length?<div className="security-push-results">{delivery.results.map(result=><span key={result.id}><strong>{result.label||'Registered browser'}</strong>: {result.status}{result.error?' · '+result.error:''}</span>)}</div>:delivery.error||delivery.detail||'—'}</td></tr>)}</tbody></table></div></section>:null}
   </>;
+}
+
+function PushDestination({action,recipients}){
+  const ids=action.subscriptionIds||[],names=ids.map(id=>recipients.get(id)).filter(Boolean),unavailable=ids.length-names.length;
+  return <div className="security-push-destination">{plural(ids.length,'browser')}{names.length?<span className="row-subtitle">{names.join(', ')}</span>:null}{unavailable?<span className="row-subtitle">{plural(unavailable,'registration')} unavailable{names.length?'': ' or hidden by your access'}</span>:null}</div>;
 }

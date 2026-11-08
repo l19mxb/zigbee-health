@@ -21,6 +21,7 @@ self.addEventListener('push',event=>event.waitUntil((async()=>{
   await self.registration.showNotification(String(data.title||'Zigbee Health').slice(0,100),{
     body:String(data.body||'Open the health monitor to review.').slice(0,300),icon:'/icon-192.png',badge:'/icon-192.png',
     tag:String(data.tag||'zigbee-health').slice(0,100),data:{url:target.origin===self.location.origin?target.pathname+target.search:'/'},
+    requireInteraction:target.origin===self.location.origin&&target.pathname==='/'&&target.searchParams.has('security'),
   });
 })()));
 self.addEventListener('notificationclick',event=>{
@@ -28,6 +29,14 @@ self.addEventListener('notificationclick',event=>{
     const target=new URL(event.notification.data?.url||'/',self.location.origin);if(target.origin!==self.location.origin)return;
     const windows=await self.clients.matchAll({type:'window',includeUncontrolled:true});
     const client=windows.find(c=>new URL(c.url).origin===self.location.origin);
-    if(client){await client.focus();client.postMessage({type:'OPEN_ALARMS'});}else await self.clients.openWindow(target.href);
+    const security=target.pathname==='/'&&target.searchParams.has('security');
+    if(client){
+      if(security&&typeof client.navigate==='function'){
+        // Reload the target so an already-open older app also understands the
+        // Security deep link. An expired Access session still uses normal login.
+        try{const navigated=await client.navigate(target.href);await (navigated||client).focus();return;}catch{}
+      }
+      await client.focus();client.postMessage(security?{type:'OPEN_SECURITY',incidentId:target.searchParams.get('security')}:{type:'OPEN_ALARMS'});
+    }else await self.clients.openWindow(target.href);
   })());
 });

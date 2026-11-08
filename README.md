@@ -28,8 +28,9 @@ to a broker.
   entry/exit delays, bypasses, latched alarm memory and weekly schedules.
 - Search devices by name, network or Zigbee identity when configuring a zone;
   assign a zone to one or several areas with independent area arming and alarms.
-- Optional security MQTT event messages and SMTP alerts, with an independent
-  publisher, configurable message templates and recorded delivery results.
+- Optional security MQTT messages, SMTP alerts and browser push to selected
+  registered phones, with independent delivery history and notification links
+  that open the Security panel.
 - Editable **90-day default retention**. Working alarms, active shunts and current
   configuration survive history cleanup.
 
@@ -137,12 +138,14 @@ a checkbox; selecting every feature for a non-administrator does not grant it.
 Administrator checkboxes are checked and locked. At least one enabled
 administrator must remain, so the last one cannot be disabled or demoted.
 
-Everyone can manage their own password and notification preferences, even with no
-dashboard features enabled. Receiving alarm push requires **Health monitor**.
-Turning that checkbox off also removes acknowledgement/shunt access and disables
-the account's existing alarm push subscriptions and pending push messages.
-Restoring Health monitor does not restart those subscriptions: the person must
-enable notifications again from their browser.
+Everyone can manage their own password and notification preferences. Browser
+enrolment requires **Health monitor** or **View security areas & alarms**.
+Each delivery still requires its matching feature: health notifications need
+Health monitor, and security notifications need Security visibility. Removing
+one feature suppresses its pending notifications while retaining the browser for
+the other feature. Losing both features disables the registration; after access
+is restored, enable notifications again from that browser. Turning off Health
+monitor also removes acknowledgement and shunt access.
 
 Server-side permission checks apply even if a client manually submits a request.
 Alarm acknowledgements, shunts and configuration changes record the acting
@@ -258,9 +261,10 @@ entry to preserve its history.
 Android Chrome is the primary target. Web Push requires a secure HTTPS origin,
 a service worker and an explicit permission grant. The LAN HTTP address remains
 usable as a dashboard but cannot enrol normal browser push subscriptions.
-The signed-in account also needs the **Health monitor** feature to enrol and receive
-alarm push. Managing shared app-address/global-push settings requires that
-separate feature checkbox or Administrator access.
+The signed-in account needs **Health monitor** or **View security areas & alarms**
+to enrol; it receives only the categories it can view. Managing the shared app
+address and global push switch requires that separate feature or Administrator
+access.
 
 1. Route an HTTPS hostname through your reverse proxy or Cloudflare Tunnel to
    the existing dashboard HTTP origin. Preserve the public `Host` header. Keep
@@ -270,23 +274,28 @@ separate feature checkbox or Administrator access.
    also permits the hostname at the app. Public-host sessions use Secure cookies.
 3. Open that HTTPS address in Android Chrome, sign in, choose **Enable on this
    device**, and allow notifications. Give each browser a recognisable label.
-4. Use **Send test** and verify the notification on the named phone. Install via
+4. Use **Send test** for health or **Security preview** for Security and verify
+   the notification on your own named phone. The preview raises no alarm. Install via
    Chrome's menu → Add to Home screen → Install, or the in-app Install button
    when Chrome offers it.
 
 The push service receives an encrypted payload; the service worker displays it
 without fetching an authenticated API in the background. Tapping it opens the
-health monitor, where an expired app/proxy login may require signing in again.
-It never acknowledges or shunts an alarm. Proxy access rules must allow the
+health monitor or Security panel for the matching category. An expired app/proxy
+login may require signing in again. Tapping never acknowledges, shunts, disarms
+or resets an alarm. Proxy access rules must allow the
 authenticated browser to register the service worker and load its assets; verify
 your actual proxy/phone combination after setup.
 The manifest link includes credentials for the signed-in browser, including when
 an access proxy protects the manifest. Keep that protection enabled; Android
 installation still depends on Chrome and the device's installation policies.
 
-Device names/descriptions are omitted by default for lock-screen privacy. New
-subscriptions receive future alarms without replaying the current stack. Fault
-and optional recovery notifications follow acknowledgement/shunt rules. The
+Device, area and zone details are omitted by default for lock-screen privacy.
+Security push is an explicit per-area alert action: choose **Browser push**, tick
+the eligible registered phones and enable the action. New subscriptions receive
+future alarms without replaying the current stack. Health fault and optional
+recovery notifications follow acknowledgement/shunt rules; Security follows the
+separate [area alert rules](docs/security.md#browser-push). The
 push service's acceptance does not prove handset delivery. Messages expire after
 five minutes; ambiguous outcomes are recorded without automatic retries. Expired
 subscriptions are disabled, and can be enabled again from the browser.
