@@ -20,8 +20,8 @@ networks. Try the isolated simulation without connecting to a broker.
 - SMTP fault/recovery notifications with duplicate suppression and delivery history.
 - Installable PWA with browser push, individual browser removal and delivery history.
 - Optional MQTT broker connection monitoring and a bounded live topic log.
-- Individual user accounts with Administrator, Operator and Viewer roles, plus
-  per-person audit attribution and session revocation.
+- Individual user accounts with feature checkboxes, access presets, per-person
+  audit attribution and session revocation.
 - Light, Dark and System colour themes, remembered in each browser.
 - Editable **90-day default retention**. Working alarms, active shunts and current
   configuration survive history cleanup.
@@ -83,7 +83,7 @@ access; do not expose the unencrypted administrative interface to the internet.
 
 On first account setup, the app creates username **`admin`** with the configured
 `APP_PASSWORD` (or Compose's `ZIGBEE_HEALTH_PASSWORD`). When upgrading from the
-shared-password version to v0.4, use `admin` and the existing dashboard password.
+shared-password version to v0.4.1, use `admin` and the existing dashboard password.
 Existing identity-less sessions are signed out during migration. The database,
 device history and notification configuration remain in the same data directory.
 
@@ -94,28 +94,57 @@ login. Use **Your account** to change your own password, or an administrator's
 and protect the data-directory backup.
 
 Administrators add accounts with an individual username, display name, password
-and role. New accounts default to Viewer. Usernames are case-insensitive and
-cannot be renamed; display names can be changed. Share initial or reset passwords
-privately. Each person can change their own password after signing in.
+and **Allowed features** checkboxes. Choose an **Access preset** as a starting
+point, then adjust the feature checkboxes for that person. New accounts start
+with the Viewer preset. Usernames are case-insensitive and cannot be renamed;
+display names can be changed. Share initial or reset passwords privately. Each
+person can change their own password after signing in.
 
-| Role | Permissions |
+| Access preset | Starting permissions |
 | --- | --- |
-| Administrator | Manage users, configuration, device records, alarms and shunts |
+| Administrator | Every feature plus user administration; full access is fixed |
 | Operator | View health and reports; acknowledge/process alarms and manage shunts |
 | Viewer | View device health, alarms and reports |
 
-Every role can manage its own password and browser notification subscriptions.
+The following checkboxes are independent except where noted. A non-administrator
+whose choices differ from the selected preset is shown as **Custom access**.
+The user list and account page show the enabled features and their count.
+
+| Feature checkbox | Access granted |
+| --- | --- |
+| Alarm viewer | Device health and the alarm stack |
+| History & reports | Event history, device trend reports and report export |
+| Acknowledge / process alarms | Acknowledge and process alarms; also enables Alarm viewer |
+| Apply / cancel shunts | Apply and cancel shunts; also enables Alarm viewer |
+| Device records & settings | Device lifecycle, record links, rooms and overrides |
+| Brokers & live topic log | Broker configuration and the live topic log |
+| Thresholds & retention | Global health thresholds and retention settings |
+| Email settings | Shared SMTP configuration and delivery history |
+| App address & global push | Shared HTTPS address and global push settings |
+
+User administration belongs only to administrators. It cannot be delegated with
+a checkbox; selecting every feature for a non-administrator does not grant it.
+Administrator checkboxes are checked and locked. At least one enabled
+administrator must remain, so the last one cannot be disabled or demoted.
+
+Everyone can manage their own password and notification preferences, even with no
+dashboard features enabled. Receiving alarm push requires **Alarm viewer**.
+Turning that checkbox off also removes acknowledgement/shunt access and disables
+the account's existing alarm push subscriptions and pending push messages.
+Restoring Alarm viewer does not restart those subscriptions: the person must
+enable notifications again from their browser.
+
 Server-side permission checks apply even if a client manually submits a request.
 Alarm acknowledgements, shunts and configuration changes record the acting
 username. Accounts are disabled rather than deleted, retaining audit attribution.
 Disabling an account ends its sessions, prevents login and stops its browser push
-delivery. At least one enabled administrator must remain; the app prevents
-disabling or demoting the last one.
+delivery.
 Re-enabling an account leaves its old browser subscriptions disabled; that person
 can enable notifications again from their browser after signing in.
 
 Administrators can reset passwords and **Sign out everywhere** for a selected
-account. A password or role change also revokes that account's existing sessions.
+account. A password, access preset or feature-permission change also revokes that
+account's existing sessions so the new permissions apply at the next sign-in.
 Signing out normally revokes only the current session. Resetting credentials does
 not rewrite old audit events or other users' sign-ins.
 
@@ -213,6 +242,9 @@ entry to preserve its history.
 Android Chrome is the primary target. Web Push requires a secure HTTPS origin,
 a service worker and an explicit permission grant. The LAN HTTP address remains
 usable as a dashboard but cannot enrol normal browser push subscriptions.
+The signed-in account also needs the **Alarm viewer** feature to enrol and receive
+alarm push. Managing shared app-address/global-push settings requires that
+separate feature checkbox or Administrator access.
 
 1. Route an HTTPS hostname through your reverse proxy or Cloudflare Tunnel to
    the existing dashboard HTTP origin. Preserve the public `Host` header. Keep

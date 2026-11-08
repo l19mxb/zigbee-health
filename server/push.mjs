@@ -1,6 +1,7 @@
 import {createHash,randomUUID} from 'node:crypto';
 import {generateVAPIDKeys,sendNotification} from 'web-push';
 import {labels} from './engine.mjs';
+import {hasPermission} from './accounts.mjs';
 
 const providers=new Set(['fcm.googleapis.com','updates.push.services.mozilla.com','web.push.apple.com']);
 export function validatePublicOrigin(value){
@@ -23,7 +24,7 @@ export class PushService{
   settings(){return {enabled:false,recovery:true,includeDeviceNames:false,...this.s.get('pushSettings')};}
   status(userId=null,admin=true){const keys=this.s.get('pushVapid'),restricted=userId&&!admin;return {...this.settings(),publicOrigin:this.s.get('web')?.publicOrigin||'',publicKey:keys?.publicKey||null,simulation:this.e.demo,subscriptions:this.s.all('SELECT id,label,created_at,updated_at,disabled_at,last_success_at,last_error FROM push_subscriptions'+(restricted?' WHERE user_id=?':'')+' ORDER BY created_at DESC',...(restricted?[userId]:[])),deliveries:this.s.all('SELECT id,subscription_id,kind,created_at,status,error,finished_at FROM push_outbox'+(restricted?' WHERE subscription_id IN (SELECT id FROM push_subscriptions WHERE user_id=?)':'')+' ORDER BY created_at DESC LIMIT 50',...(restricted?[userId]:[]))};}
   owned(id,userId,admin){const sub=this.s.one('SELECT * FROM push_subscriptions WHERE id=?',id);if(!sub||userId&&!admin&&sub.user_id!==userId)throw Error('Browser subscription not found');return sub;}
-  accountActive(sub){return sub.user_id?!!this.s.one('SELECT id FROM users WHERE id=? AND enabled=1',sub.user_id):!this.s.get('accountsInitialised');}
+  accountActive(sub){if(!sub.user_id)return !this.s.get('accountsInitialised');const owner=this.s.one('SELECT role,enabled,permissions FROM users WHERE id=? AND enabled=1',sub.user_id);if(!owner)return false;let permissions;try{permissions=JSON.parse(owner.permissions);}catch{return false;}return hasPermission({...owner,permissions},'viewHealth');}
   configure(input,actor){
     if(typeof input.enabled!=='boolean'||typeof input.recovery!=='boolean'||typeof input.includeDeviceNames!=='boolean')throw Error('Invalid push settings');
     const origin=validatePublicOrigin(String(input.publicOrigin||'')),oldOrigin=this.s.get('web')?.publicOrigin||'';

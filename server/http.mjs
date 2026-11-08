@@ -6,13 +6,13 @@ import {uid} from './engine.mjs';
 import {PushService} from './push.mjs';
 import {validateTopics} from './topic-log.mjs';
 import {Sessions} from './sessions.mjs';
-import {Accounts} from './accounts.mjs';
+import {Accounts,permissionKeys,hasPermission} from './accounts.mjs';
 
 const previewUser={id:'local-preview',username:'admin',displayName:'Local preview',role:'admin',enabled:true};
-const adminChanges=new Set(['/api/users','/api/users/update','/api/users/reset-password','/api/users/revoke-sessions','/api/thresholds','/api/device','/api/networks','/api/email','/api/push/settings','/api/devices/retire','/api/devices/restore','/api/devices/delete-history','/api/devices/link','/api/devices/unlink']);
-const operatorChanges=new Set(['/api/alarms/acknowledge','/api/alarms/process','/api/shunts','/api/shunts/cancel']);
+const adminChanges=new Set(['/api/users','/api/users/update','/api/users/reset-password','/api/users/revoke-sessions']);
+const routeFeatures=new Map([['/api/thresholds','manageThresholds'],['/api/device','manageDevices'],['/api/networks','manageBrokers'],['/api/email','manageEmail'],['/api/push/settings','manageNotifications'],...['retire','restore','delete-history','link','unlink'].map(action=>['/api/devices/'+action,'manageDevices']),['/api/alarms/acknowledge','acknowledge'],['/api/alarms/process','acknowledge'],['/api/shunts','manageShunts'],['/api/shunts/cancel','manageShunts']]);
 const personalChanges=new Set(['/api/logout','/api/account/password','/api/push/subscribe','/api/push/remove','/api/push/test']);
-const permissionsFor=user=>({configure:user.role==='admin',manageUsers:user.role==='admin',operateAlarms:['admin','operator'].includes(user.role)});
+const permissionsFor=user=>({...Object.fromEntries(permissionKeys.map(key=>[key,hasPermission(user,key)])),configure:['manageBrokers','manageThresholds','manageEmail','manageNotifications'].some(key=>hasPermission(user,key)),manageUsers:user.role==='admin',operateAlarms:hasPermission(user,'acknowledge')});
 
 export function createApp(engine,{collectors=null,push=null,password='',host='127.0.0.1',publicHost='',dist=path.resolve('dist')}={}){
   const accounts=new Accounts(engine.s,{password});
@@ -48,12 +48,21 @@ export function createApp(engine,{collectors=null,push=null,password='',host='12
       }
       const user=accounts.active()?sessions.current(token):previewUser,admin=user?.role==='admin',actor=user?.username;
       if(route.startsWith('/api/')&&!user)return json(res,401,{error:'Sign in to Zigbee Health'});
-      if(route.startsWith('/api/')&&((req.method==='GET'&&(route==='/api/users'||route==='/api/network-log')&&!admin)||(req.method!=='GET'&&((adminChanges.has(route)&&!admin)||(operatorChanges.has(route)&&!permissionsFor(user).operateAlarms)||(!admin&&!operatorChanges.has(route)&&!personalChanges.has(route))))))return json(res,403,{error:'Your role does not permit this action'});
+      const permissions=user?permissionsFor(user):null;
+      const deniedRead=req.method==='GET'&&((route==='/api/users'&&!admin)||(route==='/api/network-log'&&!permissions.manageBrokers)||(['/api/report','/api/report.csv'].includes(route)&&!permissions.viewReports));
+      const deniedWrite=req.method!=='GET'&&((adminChanges.has(route)&&!admin)||(routeFeatures.has(route)&&!hasPermission(user,routeFeatures.get(route)))||(!admin&&!routeFeatures.has(route)&&!personalChanges.has(route)));
+      if(route.startsWith('/api/')&&(deniedRead||deniedWrite))return json(res,403,{error:'Your permissions do not permit this action'});
       if(route==='/api/logout'&&req.method==='POST'){sessions.revoke(token);res.setHeader('Set-Cookie','zh_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'+(secureCookie?'; Secure':''));return json(res,200,{ok:true});}
       if(route==='/api/state'&&req.method==='GET'){
         const state=engine.snapshot();
-        if(!admin){state.networks=state.networks.map(({id,label,mode,status,connected,enabled,bridgeState,subscriptionStatus})=>({id,label,mode,status,connected,enabled,bridgeState,subscriptionStatus}));state.email={enabled:state.email.enabled};state.deliveries=[];state.events=state.events.filter(event=>!event.type.startsWith('user_')&&!event.type.startsWith('account_')&&!['administrator_created','password_changed','password_reset'].includes(event.type));}
-        return json(res,200,{...state,traffic:admin?collectors?.traffic?.()||{}:{},authenticationRequired:accounts.active(),currentUser:user,permissions:permissionsFor(user)});
+        if(!permissions.manageBrokers)state.networks=state.networks.map(({id,label,mode,status,connected,enabled,bridgeState,subscriptionStatus})=>({id,label,mode,status,connected,enabled,bridgeState,subscriptionStatus}));
+        if(!permissions.manageEmail){state.email={enabled:state.email.enabled};state.deliveries=[];}
+        if(!permissions.viewHealth){state.alarms=[];state.shunts=[];}
+        if(!permissions.viewHealth&&!permissions.viewReports&&!permissions.manageDevices)state.devices=[];
+        if(!permissions.viewHealth&&!permissions.viewReports&&!permissions.manageDevices&&!permissions.manageBrokers)state.networks=[];
+        if(!permissions.viewReports){state.events=[];state.links=permissions.manageDevices?state.links:[];}
+        else if(!admin)state.events=state.events.filter(event=>!event.type.startsWith('user_')&&!event.type.startsWith('account_')&&!['administrator_created','password_changed','password_reset','permissions_changed'].includes(event.type));
+        return json(res,200,{...state,traffic:permissions.manageBrokers?collectors?.traffic?.()||{}:{},authenticationRequired:accounts.active(),currentUser:user,permissions});
       }
       if(route==='/api/users'&&req.method==='GET')return json(res,200,{users:accounts.list(),roles:['admin','operator','viewer'],accountsEnabled:accounts.active()});
       if(route.startsWith('/api/users')&&req.method==='POST'&&!accounts.active())throw Error('Configure an administrator password before managing users');
@@ -69,11 +78,12 @@ export function createApp(engine,{collectors=null,push=null,password='',host='12
       if(route==='/api/push'&&req.method==='GET')return json(res,200,push.status(accounts.active()?user.id:null,admin));
       if(route==='/api/push/settings'&&req.method==='POST'){push.configure(body,actor);return json(res,200,{ok:true});}
       if(route==='/api/push/subscribe'&&req.method==='POST'){
+        if(!permissions.viewHealth)return json(res,403,{error:'Alarm viewer access is required for browser notifications'});
         const origin=engine.s.get('web')?.publicOrigin;if(!origin||req.headers.origin!==origin)throw Error('Enable browser notifications from the configured HTTPS app address');
         return json(res,201,push.subscribe(body.subscription,body.label,actor,accounts.active()?user.id:null));
       }
       if(route==='/api/push/remove'&&req.method==='POST'){push.remove(body.id,actor,accounts.active()?user.id:null,admin);return json(res,200,{ok:true});}
-      if(route==='/api/push/test'&&req.method==='POST')return json(res,200,await push.test(body.id,accounts.active()?user.id:null,admin));
+      if(route==='/api/push/test'&&req.method==='POST'){if(!permissions.viewHealth)return json(res,403,{error:'Alarm viewer access is required for browser notifications'});return json(res,200,await push.test(body.id,accounts.active()?user.id:null,admin));}
       if(route==='/api/network-log'&&req.method==='GET'){
         const id=url.searchParams.get('network');if(!engine.s.network(id))throw Error('Network not found');
         return json(res,200,{entries:collectors?.logs?.read(id)||[],limit:200,persistent:false});

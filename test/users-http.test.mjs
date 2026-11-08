@@ -10,6 +10,7 @@ import {PushService} from '../server/push.mjs';
 const adminPassword='synthetic-admin-password';
 const userPassword='synthetic-user-password';
 const changedPassword='synthetic-new-password';
+const featureKeys=['viewHealth','viewReports','acknowledge','manageShunts','manageDevices','manageBrokers','manageThresholds','manageEmail','manageNotifications'];
 
 async function fixture(){
   const s=new Store(),e=new Engine(s),now=e.now();
@@ -25,7 +26,7 @@ async function fixture(){
   const request=(route,body,cookie,headers={})=>new Promise((resolve,reject)=>{
     const request=http.request(url+'/api/'+route,{method:body===undefined?'GET':'POST',headers:{...(body===undefined?{}:{'Content-Type':'application/json'}),...(cookie?{cookie}:{}),...headers}},response=>{
       const chunks=[];response.on('data',chunk=>chunks.push(chunk));response.on('error',reject);
-      response.on('end',()=>{try{resolve({status:response.statusCode,body:JSON.parse(Buffer.concat(chunks)),cookie:response.headers['set-cookie']?.[0]});}catch(error){reject(error);}});
+      response.on('end',()=>{try{const contentType=response.headers['content-type']||'',raw=Buffer.concat(chunks).toString();resolve({status:response.statusCode,body:contentType.includes('application/json')?JSON.parse(raw):raw,contentType,cookie:response.headers['set-cookie']?.[0]});}catch(error){reject(error);}});
     });
     request.on('error',reject);request.end(body===undefined?undefined:JSON.stringify(body));
   });
@@ -63,9 +64,10 @@ test('administrator migration, user creation and role identities are available w
     const created=await f.create('operator-one','operator');assertSafeUser(created);
     const operator=await f.login('operator-one');assert.equal(operator.status,200);assert.equal(operator.body.user.id,created.id);assertSafeUser(operator.body.user);
     const state=await f.request('state',undefined,operator.session);
-    assert.equal(state.body.currentUser.username,'operator-one');assert.deepEqual(state.body.permissions,{configure:false,manageUsers:false,operateAlarms:true});
+    assert.equal(state.body.currentUser.username,'operator-one');assert.equal(state.body.permissions.configure,false);assert.equal(state.body.permissions.manageUsers,false);assert.equal(state.body.permissions.operateAlarms,true);
+    for(const key of ['viewHealth','viewReports','acknowledge','manageShunts'])assert.equal(state.body.permissions[key],true,key);
     const adminState=await f.request('state',undefined,f.admin.session);
-    assert.deepEqual(adminState.body.permissions,{configure:true,manageUsers:true,operateAlarms:true});
+    for(const key of [...featureKeys,'configure','manageUsers','operateAlarms'])assert.equal(adminState.body.permissions[key],true,key);
     assert.equal((await f.request('users',{username:'operator-one',password:userPassword,role:'viewer'},f.admin.session)).status,400);
     assert.equal((await f.request('users',{username:'invalid user',password:userPassword,role:'viewer'},f.admin.session)).status,400);
     assert.equal((await f.request('users',{username:'short-password',password:'short',role:'viewer'},f.admin.session)).status,400);
@@ -76,6 +78,8 @@ test('administrator migration, user creation and role identities are available w
 test('viewers can inspect health and reports, with broker and mail configuration redacted',async()=>{
   const f=await fixture();try{
     const viewer=await f.create('viewer-one'),operator=await f.create('operator-one','operator');
+    const hidden=await f.create('hidden-permission-user');
+    assert.equal((await f.request('users/update',{id:hidden.id,permissions:['viewHealth']},f.admin.session)).status,200);
     for(const user of [viewer,operator]){
       const signedIn=await f.login(user.username),state=await f.request('state',undefined,signedIn.session);
       assert.equal(state.status,200);assertSafeUser(state.body.currentUser);
@@ -84,13 +88,15 @@ test('viewers can inspect health and reports, with broker and mail configuration
       const network=state.body.networks[0];assert.equal(network.label,'Fixture network');
       for(const field of ['host','port','protocol','baseTopic','username','password','passwordSet','topicFilters'])assert.ok(!Object.hasOwn(network,field),field+' should not be disclosed');
       assert.deepEqual(state.body.traffic,{});
-      for(const secret of ['broker.fixture.test','fixture-broker-user','smtp.fixture.test','sender@example.test','recipient@example.test','fixture-smtp-user'])assert.ok(!JSON.stringify(state.body).includes(secret));
+      assert.ok(!state.body.events.some(event=>event.type==='permissions_changed'));
+      for(const secret of ['broker.fixture.test','fixture-broker-user','smtp.fixture.test','sender@example.test','recipient@example.test','fixture-smtp-user','hidden-permission-user'])assert.ok(!JSON.stringify(state.body).includes(secret));
       assert.equal((await f.request('report?device='+encodeURIComponent(f.device.id),undefined,signedIn.session)).status,200);
       assert.equal((await f.request('users',undefined,signedIn.session)).status,403);
       assert.equal((await f.request('network-log?network=fixture-network',undefined,signedIn.session)).status,403);
     }
     const adminState=await f.request('state',undefined,f.admin.session);
     assert.equal(adminState.body.networks[0].host,'broker.fixture.test');assert.equal(adminState.body.email.recipient,'recipient@example.test');
+    assert.ok(adminState.body.events.some(event=>event.type==='permissions_changed'&&event.message.includes('hidden-permission-user')));
     assert.equal((await f.request('network-log?network=fixture-network',undefined,f.admin.session)).status,200);
   }finally{await f.close();}
 });
@@ -283,5 +289,113 @@ test('disabling a browser owner stops queued delivery and re-enabling the accoun
     const resumedAt=f.e.now();f.e.clock=()=>resumedAt+61000;
     const tested=await f.request('push/test',{id},signedIn.session);
     assert.equal(tested.status,200,JSON.stringify(tested.body));assert.equal(tested.body.status,'accepted');assert.equal(f.sent.length,1);
+  }finally{await f.close();}
+});
+
+test('a viewer with broker management can inspect traffic and save brokers while other administration remains denied',async()=>{
+  const f=await fixture();try{
+    const permissions=['viewHealth','manageBrokers'],viewer=await f.create('broker-manager','viewer',{permissions});
+    assert.deepEqual(new Set(viewer.permissions),new Set(permissions));
+    const signedIn=await f.login(viewer.username),state=await f.request('state',undefined,signedIn.session);
+    assert.equal(state.body.currentUser.role,'viewer');assert.equal(state.body.permissions.manageBrokers,true);assert.equal(state.body.permissions.manageUsers,false);
+    assert.equal(state.body.networks[0].host,'broker.fixture.test');assert.equal(state.body.networks[0].username,'fixture-broker-user');
+    assert.equal((await f.request('network-log?network=fixture-network',undefined,signedIn.session)).status,200);
+    assert.equal((await f.request('networks',{id:'fixture-network',label:'Updated by broker manager',host:'broker.fixture.test',port:1883,protocol:'mqtt',baseTopic:'zigbee2mqtt',enabled:true,username:'fixture-broker-user',role:'admin'},signedIn.session)).status,200);
+    assert.equal(f.s.network('fixture-network').label,'Updated by broker manager');assert.equal(f.s.unseal(f.s.network('fixture-network').password),'fixture-broker-secret');
+    assert.equal(f.s.one("SELECT actor FROM events WHERE type='network_settings_changed'").actor,'broker-manager');
+    assert.equal((await f.request('users',undefined,signedIn.session)).status,403);
+    assert.equal((await f.request('users/update',{id:viewer.id,role:'admin',permissions:featureKeys},signedIn.session)).status,403);
+    assert.equal((await f.request('email',{enabled:false},signedIn.session)).status,403);
+    assert.equal((await f.request('thresholds',{retentionDays:7},signedIn.session)).status,403);
+    assert.equal((await f.request('device',{id:f.device.id,room:'Not allowed'},signedIn.session)).status,403);
+    assert.equal((await f.request('push/settings',{...pushSettings,enabled:false},signedIn.session)).status,403);
+    assert.equal((await f.request('report?device='+encodeURIComponent(f.device.id),undefined,signedIn.session)).status,403);
+    assert.equal((await f.request('report.csv?device='+encodeURIComponent(f.device.id),undefined,signedIn.session)).status,403);
+    assert.equal(f.s.get('email').enabled,true);assert.equal(f.e.thresholds().retentionDays,90);
+  }finally{await f.close();}
+});
+
+test('custom feature checkboxes override an operator role preset at the API boundary',async()=>{
+  const f=await fixture();try{
+    const operator=await f.create('limited-operator','operator',{permissions:['viewHealth']}),signedIn=await f.login(operator.username);
+    const state=await f.request('state',undefined,signedIn.session);
+    assert.deepEqual(state.body.currentUser.permissions,['viewHealth']);assert.ok(state.body.alarms.length>0);assert.ok(state.body.devices.length>0);
+    assert.equal(state.body.permissions.viewHealth,true);assert.equal(state.body.permissions.acknowledge,false);assert.equal(state.body.permissions.manageShunts,false);assert.equal(state.body.permissions.viewReports,false);
+    for(const [route,body] of [
+      ['alarms/acknowledge',{ids:['fixture-alarm'],permissions:featureKeys,role:'admin'}],
+      ['alarms/process',{id:'fixture-restored-alarm'}],
+      ['shunts',{scopeType:'device',scopeId:f.device.id,durationMin:60,reason:'Not granted'}],
+      ['shunts/cancel',{id:'a-shunt'}]
+    ])assert.equal((await f.request(route,body,signedIn.session)).status,403,route);
+    for(const route of ['report?device='+encodeURIComponent(f.device.id),'report.csv?device='+encodeURIComponent(f.device.id),'network-log?network=fixture-network','users'])assert.equal((await f.request(route,undefined,signedIn.session)).status,403,route);
+    assert.equal(f.s.one('SELECT ack_at FROM incidents WHERE id=?','fixture-alarm').ack_at,null);assert.equal(f.s.all('SELECT * FROM shunts').length,0);
+  }finally{await f.close();}
+});
+
+test('an account with no feature access receives minimal state and can still manage its own password',async()=>{
+  const f=await fixture();try{
+    const user=await f.create('no-feature-user','operator',{permissions:[]}),signedIn=await f.login(user.username),state=await f.request('state',undefined,signedIn.session);
+    assert.equal(state.status,200);assert.equal(state.body.currentUser.id,user.id);assert.deepEqual(state.body.currentUser.permissions,[]);
+    for(const key of featureKeys)assert.equal(state.body.permissions[key],false,key);
+    for(const key of ['devices','alarms','shunts','events','links','networks','deliveries'])assert.deepEqual(state.body[key],[],key);
+    for(const secret of ['broker.fixture.test','smtp.fixture.test','sender@example.test','recipient@example.test','Fixture sensor'])assert.ok(!JSON.stringify(state.body).includes(secret));
+    assert.equal((await f.request('report?device='+encodeURIComponent(f.device.id),undefined,signedIn.session)).status,403);
+    assert.equal((await f.request('report.csv?device='+encodeURIComponent(f.device.id),undefined,signedIn.session)).status,403);
+    assert.equal((await f.request('network-log?network=fixture-network',undefined,signedIn.session)).status,403);
+    assert.equal((await f.request('users',undefined,signedIn.session)).status,403);
+    assert.equal((await f.request('push',undefined,signedIn.session)).status,200);
+    assert.equal((await f.request('push/settings',pushSettings,signedIn.session)).status,403);
+    assert.equal((await f.request('push/settings',pushSettings,f.admin.session)).status,200);
+    assert.equal((await f.request('push/subscribe',{subscription:subscription('no-features'),label:'Not permitted'},signedIn.session,canonicalHeaders)).status,403);
+    assert.equal((await f.request('push/test',{id:'another-browser'},signedIn.session)).status,403);
+    const changed=await f.request('account/password',{currentPassword:userPassword,newPassword:changedPassword},signedIn.session);
+    assert.equal(changed.status,200);assert.equal((await f.request('state',undefined,signedIn.session)).status,401);
+    const relogged=await f.login(user.username,changedPassword);assert.equal(relogged.status,200);assert.deepEqual(relogged.body.user.permissions,[]);
+  }finally{await f.close();}
+});
+
+test('feature permission changes revoke existing sessions and new sessions obey the new grants',async()=>{
+  const f=await fixture();try{
+    const user=await f.create('changed-permissions','viewer'),normal=await f.login(user.username),remembered=await f.login(user.username,userPassword,true);
+    assert.equal((await f.request('report?device='+encodeURIComponent(f.device.id),undefined,normal.session)).status,200);
+    const updated=await f.request('users/update',{id:user.id,permissions:['viewHealth','acknowledge']},f.admin.session);
+    assert.equal(updated.status,200);assert.deepEqual(new Set(updated.body.user.permissions),new Set(['viewHealth','acknowledge']));
+    for(const session of [normal.session,remembered.session])assert.equal((await f.request('state',undefined,session)).status,401);
+    const current=await f.login(user.username),state=await f.request('state',undefined,current.session);
+    assert.equal(state.body.permissions.acknowledge,true);assert.equal(state.body.permissions.viewReports,false);
+    assert.equal((await f.request('alarms/acknowledge',{ids:['fixture-alarm'],note:'Custom acknowledgement permission'},current.session)).status,200);
+    assert.equal((await f.request('shunts',{scopeType:'device',scopeId:f.device.id,durationMin:60,reason:'Not granted'},current.session)).status,403);
+    assert.equal((await f.request('report?device='+encodeURIComponent(f.device.id),undefined,current.session)).status,403);
+    assert.equal((await f.request('state',undefined,f.admin.session)).status,200);
+    assert.equal((await f.request('users/update',{id:user.id,permissions:['manageUsers']},f.admin.session)).status,400);
+    assert.equal((await f.request('users/update',{id:user.id,permissions:'viewHealth'},f.admin.session)).status,400);
+  }finally{await f.close();}
+});
+
+test('removing health access stops queued push and restoring health access does not silently re-enable a browser',async()=>{
+  const f=await fixture();try{
+    const user=await f.create('health-revoked','viewer'),signedIn=await f.login(user.username);
+    assert.equal((await f.request('push/settings',{...pushSettings,includeDeviceNames:true},f.admin.session)).status,200);
+    const sub=subscription('health-revoked'),enrolled=await f.request('push/subscribe',{subscription:sub,label:'Owned browser'},signedIn.session,canonicalHeaders);
+    assert.equal(enrolled.status,201);const id=enrolled.body.id;
+    f.s.run("INSERT INTO push_outbox VALUES('fixture-health-revoked-test',NULL,?,'test',0,?,'queued',NULL,NULL)",id,f.e.now());
+    assert.equal((await f.request('users/update',{id:user.id,permissions:[]},f.admin.session)).status,200);
+    assert.equal((await f.request('state',undefined,signedIn.session)).status,401);
+    await f.push.deliver();assert.equal(f.sent.length,0);
+    assert.equal(f.s.one('SELECT status FROM push_outbox WHERE id=?','fixture-health-revoked-test').status,'suppressed');
+    assert.ok(f.s.one('SELECT disabled_at FROM push_subscriptions WHERE id=?',id).disabled_at);
+    const limited=await f.login(user.username),status=await f.request('push',undefined,limited.session);
+    assert.equal(status.status,200);assert.equal(status.body.subscriptions[0].id,id);assert.ok(status.body.subscriptions[0].disabled_at);
+    assert.equal((await f.request('push/test',{id},limited.session)).status,403);
+    assert.equal((await f.request('push/subscribe',{subscription:sub,label:'Owned browser'},limited.session,canonicalHeaders)).status,403);
+    assert.equal((await f.request('users/update',{id:user.id,permissions:['viewHealth']},f.admin.session)).status,200);
+    const restored=await f.login(user.username),restoredStatus=await f.request('push',undefined,restored.session);
+    assert.ok(restoredStatus.body.subscriptions[0].disabled_at);assert.equal((await f.request('push/test',{id},restored.session)).status,400);
+    await f.push.deliver();assert.equal(f.sent.length,0);
+    // Even a user without health access retains control of removing their own registration.
+    assert.equal((await f.request('users/update',{id:user.id,permissions:[]},f.admin.session)).status,200);
+    const noHealth=await f.login(user.username);
+    assert.equal((await f.request('push/remove',{id},noHealth.session)).status,200);
+    assert.equal((await f.request('push',undefined,noHealth.session)).body.subscriptions.length,0);
   }finally{await f.close();}
 });

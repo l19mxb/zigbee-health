@@ -1,8 +1,19 @@
 import crypto from 'node:crypto';
 
 export const roles=Object.freeze(['admin','operator','viewer']);
+export const permissionKeys=Object.freeze(['viewHealth','viewReports','acknowledge','manageShunts','manageDevices','manageBrokers','manageThresholds','manageEmail','manageNotifications']);
+export const rolePermissions=Object.freeze({admin:Object.freeze([...permissionKeys].sort()),operator:Object.freeze(['viewHealth','viewReports','acknowledge','manageShunts'].sort()),viewer:Object.freeze(['viewHealth','viewReports'].sort())});
+const normalizePermissions=(value,access)=>{
+  if(value===undefined)return [...rolePermissions[access]];
+  if(!Array.isArray(value)||value.length>permissionKeys.length||value.some(key=>typeof key!=='string'||!permissionKeys.includes(key))||new Set(value).size!==value.length)throw Error('Choose valid feature permissions without duplicates');
+  if(access==='admin'&&value.length!==permissionKeys.length)throw Error('Administrators have every feature permission');
+  const result=[...value];
+  if((result.includes('acknowledge')||result.includes('manageShunts'))&&!result.includes('viewHealth'))result.push('viewHealth');
+  return result.sort();
+};
+export const hasPermission=(user,key)=>!!user?.enabled&&permissionKeys.includes(key)&&(user.role==='admin'||Array.isArray(user.permissions)&&user.permissions.includes(key));
 const PASSWORD_OPTIONS={N:32768,r:8,p:3,maxmem:64*1024*1024};
-const dto=row=>row?{id:row.id,username:row.username,displayName:row.display_name,role:row.role,enabled:!!row.enabled,authVersion:row.auth_version,createdAt:row.created_at,updatedAt:row.updated_at,lastLoginAt:row.last_login_at}:null;
+const dto=row=>row?{id:row.id,username:row.username,displayName:row.display_name,role:row.role,permissions:normalizePermissions(row.permissions===null?undefined:JSON.parse(row.permissions),row.role),enabled:!!row.enabled,authVersion:row.auth_version,createdAt:row.created_at,updatedAt:row.updated_at,lastLoginAt:row.last_login_at}:null;
 const username=value=>{
   if(typeof value!=='string')throw Error('Enter a username');
   const result=value.trim().toLowerCase();
@@ -29,7 +40,7 @@ export class Accounts{
       if(this.count()){if(!this.s.get('accountsInitialised'))this.s.set('accountsInitialised',true);return;}
       if(this.s.get('accountsInitialised')||!initialPassword)return;
       const secret=encodePassword(initialPassword),now=this.clock(),id=crypto.randomUUID();
-      this.s.run('INSERT INTO users(id,username,display_name,role,enabled,password_salt,password_hash,auth_version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',id,'admin','Administrator','admin',1,secret.salt,secret.hash,1,now,now);
+      this.s.run('INSERT INTO users(id,username,display_name,role,enabled,password_salt,password_hash,auth_version,created_at,updated_at,permissions) VALUES(?,?,?,?,?,?,?,?,?,?,?)',id,'admin','Administrator','admin',1,secret.salt,secret.hash,1,now,now,JSON.stringify(rolePermissions.admin));
       this.s.run('UPDATE push_subscriptions SET user_id=? WHERE user_id IS NULL',id);
       this.s.set('accountsInitialised',true);
       this.s.event('administrator_created','Initial administrator account created',{actor:'System',at:now});
@@ -50,13 +61,13 @@ export class Accounts{
     return this.get(row.id);
   }
   create(body,actor='System'){
-    const name=username(body.username),label=displayName(body.displayName===undefined?name:body.displayName),access=role(body.role===undefined?'viewer':body.role);
+    const name=username(body.username),label=displayName(body.displayName===undefined?name:body.displayName),access=role(body.role===undefined?'viewer':body.role),permissions=normalizePermissions(body.permissions,access);
     if(body.enabled!==undefined&&typeof body.enabled!=='boolean')throw Error('User enabled state must be on or off');
     const secret=encodePassword(body.password),enabled=body.enabled!==false,id=crypto.randomUUID(),now=this.clock();
     return this.s.transaction(()=>{
       if(this.s.one('SELECT id FROM users WHERE username=?',name))throw Error('Username is already in use');
       if(!this.active())throw Error('Configure the initial administrator before adding users');
-      this.s.run('INSERT INTO users(id,username,display_name,role,enabled,password_salt,password_hash,auth_version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',id,name,label,access,enabled?1:0,secret.salt,secret.hash,1,now,now);
+      this.s.run('INSERT INTO users(id,username,display_name,role,enabled,password_salt,password_hash,auth_version,created_at,updated_at,permissions) VALUES(?,?,?,?,?,?,?,?,?,?,?)',id,name,label,access,enabled?1:0,secret.salt,secret.hash,1,now,now,JSON.stringify(permissions));
       this.s.event('user_created','User '+name+' created as '+access,{actor,at:now});
       return this.get(id);
     });
@@ -69,16 +80,19 @@ export class Accounts{
     if(body.username!==undefined)throw Error('Usernames cannot be changed');
     return this.s.transaction(()=>{
       const old=this.requireUser(body.id),label=body.displayName===undefined?old.display_name:displayName(body.displayName),access=body.role===undefined?old.role:role(body.role);
+      const oldPermissions=dto(old).permissions,permissions=body.permissions===undefined&&access===old.role?oldPermissions:normalizePermissions(body.permissions,access),permissionsChanged=JSON.stringify(permissions)!==JSON.stringify(oldPermissions);
       if(body.enabled!==undefined&&typeof body.enabled!=='boolean')throw Error('User enabled state must be on or off');
       const enabled=body.enabled===undefined?!!old.enabled:body.enabled;
       if(old.enabled&&old.role==='admin'&&(!enabled||access!=='admin')&&this.s.one("SELECT count(*) n FROM users WHERE role='admin' AND enabled=1").n<=1)throw Error('Keep at least one enabled administrator');
-      this.s.run('UPDATE users SET display_name=?,role=?,enabled=?,updated_at=? WHERE id=?',label,access,enabled?1:0,this.clock(),old.id);
-      if(old.role!==access||!!old.enabled!==enabled)this.invalidate(old.id);
-      if(!enabled){
-        this.s.run("UPDATE push_subscriptions SET disabled_at=coalesce(disabled_at,?),last_error='Account disabled' WHERE user_id=?",this.clock(),old.id);
-        this.s.run("UPDATE push_outbox SET status='suppressed',error='Account disabled',finished_at=? WHERE status='queued' AND subscription_id IN (SELECT id FROM push_subscriptions WHERE user_id=?)",this.clock(),old.id);
+      this.s.run('UPDATE users SET display_name=?,role=?,permissions=?,enabled=?,updated_at=? WHERE id=?',label,access,JSON.stringify(permissions),enabled?1:0,this.clock(),old.id);
+      if(old.role!==access||!!old.enabled!==enabled||permissionsChanged)this.invalidate(old.id);
+      if(!enabled||oldPermissions.includes('viewHealth')&&!permissions.includes('viewHealth')){
+        const reason=!enabled?'Account disabled':'Health access removed';
+        this.s.run('UPDATE push_subscriptions SET disabled_at=coalesce(disabled_at,?),last_error=? WHERE user_id=?',this.clock(),reason,old.id);
+        this.s.run("UPDATE push_outbox SET status='suppressed',error=?,finished_at=? WHERE status='queued' AND subscription_id IN (SELECT id FROM push_subscriptions WHERE user_id=?)",reason,this.clock(),old.id);
       }
       this.s.event('user_updated','User '+old.username+' updated ('+access+', '+(enabled?'enabled':'disabled')+')',{actor,at:this.clock()});
+      if(permissionsChanged)this.s.event('permissions_changed','Feature permissions updated for '+old.username+': '+(permissions.join(', ')||'none'),{actor,at:this.clock()});
       return this.get(old.id);
     });
   }

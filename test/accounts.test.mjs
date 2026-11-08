@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
 import {Store} from '../server/store.mjs';
-import {Accounts} from '../server/accounts.mjs';
+import {Accounts,permissionKeys,rolePermissions,hasPermission} from '../server/accounts.mjs';
 import {Sessions} from '../server/sessions.mjs';
 
 const password='synthetic-account-password';
@@ -149,5 +149,92 @@ test('legacy session migration discards identity-less tokens and adopts existing
     s.run('INSERT INTO push_subscriptions(id,endpoint_hash,json,label,created_at,updated_at) VALUES(?,?,?,?,?,?)','orphan','other-hash','{}','Later orphan',1,1);
     const remembered=new Sessions(s,a).issue(true,admin);s.close();s=new Store(file);a=new Accounts(s,{password:replacement});
     assert.equal(a.authenticate('admin',replacement),null);assert.ok(new Sessions(s,a).valid(remembered.token));assert.equal(s.one('SELECT user_id FROM push_subscriptions WHERE id=?','orphan').user_id,null);
+  }finally{s?.close();assert.equal(path.dirname(fs.realpathSync(dir)),fs.realpathSync(os.tmpdir()));fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test('roles are permission presets while administrator permissions remain complete',()=>{
+  const f=fixture();try{
+    assert.equal(permissionKeys.length,9);assert.deepEqual(f.admin.permissions,[...permissionKeys].sort());
+    const ordinary=viewer(f),operator=f.accounts.create({username:'operator',role:'operator',password},'admin');
+    assert.deepEqual(ordinary.permissions,rolePermissions.viewer);assert.deepEqual(operator.permissions,rolePermissions.operator);
+    assert.equal(hasPermission(ordinary,'viewHealth'),true);assert.equal(hasPermission(ordinary,'manageBrokers'),false);
+    assert.equal(hasPermission(operator,'acknowledge'),true);assert.equal(hasPermission(operator,'manageUsers'),false);
+    for(const key of permissionKeys)assert.equal(hasPermission(f.admin,key),true);
+    assert.equal(hasPermission({...f.admin,enabled:false},'viewHealth'),false);assert.equal(hasPermission(null,'viewHealth'),false);
+    assert.throws(()=>f.accounts.update({id:f.admin.id,permissions:['viewHealth']},'admin'),/every feature/);
+    assert.deepEqual(f.accounts.get(f.admin.id).permissions,rolePermissions.admin);
+  }finally{f.close();}
+});
+
+test('explicit nonadmin checkboxes can grant independent features and override role defaults',()=>{
+  const f=fixture();try{
+    const custom=f.accounts.create({username:'custom-viewer',role:'viewer',permissions:['manageBrokers'],password},'admin');
+    assert.deepEqual(custom.permissions,['manageBrokers']);assert.equal(hasPermission(custom,'manageBrokers'),true);assert.equal(hasPermission(custom,'viewHealth'),false);assert.equal(hasPermission(custom,'viewReports'),false);
+    const limited=f.accounts.create({username:'limited-operator',role:'operator',permissions:[],password},'admin');
+    assert.deepEqual(limited.permissions,[]);assert.equal(hasPermission(limited,'acknowledge'),false);
+    f.accounts.update({id:limited.id,permissions:['acknowledge']},'admin');assert.deepEqual(f.accounts.get(limited.id).permissions,['acknowledge','viewHealth']);
+    f.accounts.update({id:limited.id,permissions:['manageShunts']},'admin');assert.deepEqual(f.accounts.get(limited.id).permissions,['manageShunts','viewHealth']);
+    f.accounts.update({id:limited.id,permissions:['manageDevices']},'admin');assert.deepEqual(f.accounts.get(limited.id).permissions,['manageDevices']);
+  }finally{f.close();}
+});
+
+test('feature permissions reject unknown keys, duplicates and nonarrays without changing accounts',()=>{
+  const f=fixture();try{
+    const user=viewer(f),version=user.authVersion;
+    for(const permissions of [['unknown'],['viewHealth','viewHealth'],['viewHealth',1],null,{},'viewHealth',true]){
+      assert.throws(()=>f.accounts.update({id:user.id,permissions},'admin'),/valid feature permissions/);
+      assert.throws(()=>f.accounts.create({username:'invalid-permissions',password,permissions},'admin'),/valid feature permissions/);
+    }
+    assert.equal(f.accounts.count(),2);assert.equal(f.accounts.get(user.id).authVersion,version);assert.deepEqual(f.accounts.get(user.id).permissions,rolePermissions.viewer);
+    assert.throws(()=>f.accounts.create({username:'partial-admin',password,role:'admin',permissions:[]},'admin'),/every feature/);
+    assert.throws(()=>f.accounts.update({id:f.admin.id,role:'viewer',permissions:[]},'admin'),/at least one enabled administrator/);
+  }finally{f.close();}
+});
+
+test('permission changes revoke normal and remembered sessions and produce an attributed audit event',()=>{
+  const f=fixture();try{
+    const user=viewer(f),normal=f.sessions.issue(false,user),remembered=f.sessions.issue(true,user);
+    f.accounts.update({id:user.id,permissions:['manageBrokers']},'admin');
+    assert.equal(f.sessions.valid(normal.token),false);assert.equal(f.sessions.valid(remembered.token),false);assert.equal(f.s.one('SELECT count(*) n FROM auth_sessions WHERE user_id=?',user.id).n,0);
+    assert.throws(()=>f.sessions.issue(false,user),/active account/);
+    const fresh=f.accounts.authenticate('viewer',password),newSession=f.sessions.issue(false,fresh);assert.deepEqual(f.sessions.current(newSession.token).permissions,['manageBrokers']);
+    const event=f.s.one("SELECT actor,message FROM events WHERE type='permissions_changed' ORDER BY id DESC LIMIT 1");assert.equal(event.actor,'admin');assert.match(event.message,/viewer.*manageBrokers/);
+    const oldVersion=fresh.authVersion;f.accounts.update({id:user.id,displayName:'Renamed'},'admin');assert.equal(f.accounts.get(user.id).authVersion,oldVersion);assert.ok(f.sessions.valid(newSession.token));
+  }finally{f.close();}
+});
+
+test('role changes apply new presets only when no explicit permission array is supplied',()=>{
+  const f=fixture();try{
+    const user=f.accounts.create({username:'custom-permissions',password,permissions:['manageEmail']},'admin');
+    f.accounts.update({id:user.id,displayName:'Same custom'},'admin');assert.deepEqual(f.accounts.get(user.id).permissions,['manageEmail']);
+    f.accounts.update({id:user.id,role:'operator'},'admin');assert.deepEqual(f.accounts.get(user.id).permissions,rolePermissions.operator);
+    f.accounts.update({id:user.id,role:'viewer',permissions:['manageThresholds']},'admin');assert.deepEqual(f.accounts.get(user.id).permissions,['manageThresholds']);
+  }finally{f.close();}
+});
+
+test('removing health access disables existing push and does not revive it when health permission is restored',()=>{
+  const f=fixture();try{
+    const user=viewer(f);
+    f.s.run('INSERT INTO push_subscriptions(id,endpoint_hash,json,label,created_at,updated_at,user_id) VALUES(?,?,?,?,?,?,?)','phone','phone','{}','Phone',1,1,user.id);
+    f.s.run('INSERT INTO push_outbox(id,incident_id,subscription_id,kind,rearm,created_at,status) VALUES(?,?,?,?,?,?,?)','job',null,'phone','test',0,1,'queued');
+    f.accounts.update({id:user.id,permissions:['viewReports']},'admin');
+    const disabled=f.s.one('SELECT disabled_at,last_error FROM push_subscriptions WHERE id=?','phone');assert.ok(disabled.disabled_at);assert.equal(disabled.last_error,'Health access removed');
+    assert.equal(f.s.one('SELECT status FROM push_outbox WHERE id=?','job').status,'suppressed');
+    f.accounts.update({id:user.id,permissions:['viewReports','viewHealth']},'admin');
+    assert.equal(f.s.one('SELECT disabled_at FROM push_subscriptions WHERE id=?','phone').disabled_at,disabled.disabled_at);assert.equal(f.accounts.get(user.id).enabled,true);
+  }finally{f.close();}
+});
+
+test('legacy account rows receive role-preserving permission backfill without overriding explicit custom grants',()=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'zigbee-permission-migration-')),file=path.join(dir,'health.db');let s;
+  try{
+    const old=new DatabaseSync(file);
+    old.exec("CREATE TABLE users(id TEXT PRIMARY KEY,username TEXT NOT NULL COLLATE NOCASE UNIQUE,display_name TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL,password_salt TEXT NOT NULL,password_hash TEXT NOT NULL,auth_version INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,last_login_at INTEGER)");
+    const insert=old.prepare('INSERT INTO users VALUES(?,?,?,?,?,?,?,?,?,?,?)');
+    for(const access of ['admin','operator','viewer'])insert.run(access,access,access,access,1,'a'.repeat(32),'b'.repeat(64),1,1,1,null);
+    old.close();s=new Store(file);let a=new Accounts(s);
+    for(const access of ['admin','operator','viewer'])assert.deepEqual(a.get(access).permissions,rolePermissions[access]);
+    s.run('UPDATE users SET permissions=? WHERE id=?',JSON.stringify(['manageBrokers']),'viewer');s.close();s=new Store(file);a=new Accounts(s);
+    assert.deepEqual(a.get('viewer').permissions,['manageBrokers']);assert.equal(a.get('viewer').authVersion,1);assert.equal(a.count(),3);
   }finally{s?.close();assert.equal(path.dirname(fs.realpathSync(dir)),fs.realpathSync(os.tmpdir()));fs.rmSync(dir,{recursive:true,force:true});}
 });

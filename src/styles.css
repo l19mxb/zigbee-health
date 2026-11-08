@@ -83,3 +83,5 @@
 .login-theme{display:flex;width:max-content;align-self:flex-end;margin:0 0 17px auto}
 @media(min-width:1151px) and (max-width:1700px){.page-header{flex-wrap:wrap;padding-bottom:14px;gap:12px}.header-controls{margin-left:auto;flex-wrap:wrap}}
 @media(max-width:760px){.header-controls .theme-control{flex:0 0 auto}.header-controls .theme-control select{min-width:95px;max-width:95px;width:95px}.theme-control{gap:5px;font-size:11px}.login-theme{margin-bottom:12px}}
+/* Device names remain readable when trend-report access is not granted. */
+.device-name:disabled{opacity:1;color:inherit;cursor:default}

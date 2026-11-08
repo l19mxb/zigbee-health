@@ -3,11 +3,11 @@ import {createPortal} from 'react-dom';
 import {request} from './api.jsx';
 import {Badge,Battery,Field,Icon,Modal,Signal,date,duration,titleCase} from './ui.jsx';
 
-export function ContextMenu({menu,onClose,onAction,canOperate=true,canManage=true}){
+export function ContextMenu({menu,onClose,onAction,canOperate=true,canManage=true,canShunt=canOperate,canReport=true}){
   const ref=useRef(null);
   useEffect(()=>{const close=e=>{if(!ref.current?.contains(e.target))onClose();};const key=e=>{if(e.key==='Escape')onClose();if(['ArrowDown','ArrowUp'].includes(e.key)){e.preventDefault();const buttons=[...ref.current.querySelectorAll('button:not(:disabled)')],index=buttons.indexOf(document.activeElement);buttons[(index+(e.key==='ArrowDown'?1:buttons.length-1))%buttons.length]?.focus();}};document.addEventListener('pointerdown',close);document.addEventListener('keydown',key);ref.current?.querySelector('button:not(:disabled)')?.focus();return()=>{document.removeEventListener('pointerdown',close);document.removeEventListener('keydown',key);};},[]);
   const a=menu.type==='alarm'?menu.row:null;
-  const options=[...(a?[['ack','Acknowledge','check',!!a.ack_at],...(a.restored_at?[['process','Process restored alarm','check',false]]:[])]:[]),['shunt','Shunt (timed)…','shield',false],['indefinite','Shunt (indefinite)…','shield',false],['report','Run report…','file',!!a&&!a.device_id],...(!a?[['retire','Retire device…','device',false]]:[])].filter(([key])=>key==='report'||(key==='retire'?canManage:canOperate));
+  const options=[...(a?[['ack','Acknowledge','check',!!a.ack_at],...(a.restored_at?[['process','Process restored alarm','check',false]]:[])]:[]),['shunt','Shunt (timed)…','shield',false],['indefinite','Shunt (indefinite)…','shield',false],['report','Run report…','file',!!a&&!a.device_id],...(!a?[['retire','Retire device…','device',false]]:[])].filter(([key])=>key==='report'?canReport:key==='retire'?canManage:['shunt','indefinite'].includes(key)?canShunt:canOperate);
   return createPortal(<div ref={ref} role="menu" aria-label="Item actions" className="context-menu" style={{left:Math.max(8,Math.min(menu.x-200,innerWidth-242)),top:Math.max(8,Math.min(menu.y,innerHeight-options.length*42-20))}}>{options.map(([key,label,icon,disabled])=><button key={key} role="menuitem" disabled={disabled} onClick={()=>onAction(key,menu)}><Icon name={icon}/>{label}</button>)}</div>,document.body);
 }
 

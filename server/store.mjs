@@ -2,6 +2,7 @@ import {DatabaseSync} from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import {rolePermissions} from './accounts.mjs';
 
 export const defaults={retentionDays:90,lowBattery:20,batteryRecovery:25,weakSignal:60,signalRecovery:80,mainsTimeoutMin:60,batteryTimeoutMin:1500,faultDelaySec:120,recoveryDelaySec:60,dropoutCount:3,dropoutWindowHours:24};
 export const parse=value=>value?JSON.parse(value):null;
@@ -29,10 +30,12 @@ export class Store {
     this.db.exec(`CREATE TABLE IF NOT EXISTS push_subscriptions(id TEXT PRIMARY KEY,endpoint_hash TEXT NOT NULL UNIQUE,json TEXT NOT NULL,label TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,disabled_at INTEGER,last_success_at INTEGER,last_error TEXT);
       CREATE TABLE IF NOT EXISTS push_outbox(id TEXT PRIMARY KEY,incident_id TEXT,subscription_id TEXT NOT NULL,kind TEXT NOT NULL,rearm INTEGER NOT NULL,created_at INTEGER NOT NULL,status TEXT NOT NULL,error TEXT,finished_at INTEGER,UNIQUE(incident_id,subscription_id,kind,rearm));
       CREATE INDEX IF NOT EXISTS push_outbox_status ON push_outbox(status,created_at);`);
-    this.db.exec(`CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,username TEXT NOT NULL COLLATE NOCASE UNIQUE,display_name TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('admin','operator','viewer')),enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),password_salt TEXT NOT NULL,password_hash TEXT NOT NULL,auth_version INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,last_login_at INTEGER);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,username TEXT NOT NULL COLLATE NOCASE UNIQUE,display_name TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('admin','operator','viewer')),enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),password_salt TEXT NOT NULL,password_hash TEXT NOT NULL,auth_version INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,last_login_at INTEGER,permissions TEXT);
       CREATE TABLE IF NOT EXISTS auth_sessions(token_hash TEXT PRIMARY KEY,credential_tag TEXT NOT NULL,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,user_id TEXT,auth_version INTEGER);
       CREATE INDEX IF NOT EXISTS auth_session_expiry ON auth_sessions(expires_at)`);
     const sessionColumns=this.all('PRAGMA table_info(auth_sessions)').map(c=>c.name);
+    if(!this.all('PRAGMA table_info(users)').some(c=>c.name==='permissions'))this.db.exec('ALTER TABLE users ADD COLUMN permissions TEXT');
+    for(const [access,permissions] of Object.entries(rolePermissions))this.run('UPDATE users SET permissions=? WHERE permissions IS NULL AND role=?',JSON.stringify(permissions),access);
     if(!sessionColumns.includes('user_id'))this.db.exec('ALTER TABLE auth_sessions ADD COLUMN user_id TEXT');
     if(!sessionColumns.includes('auth_version'))this.db.exec('ALTER TABLE auth_sessions ADD COLUMN auth_version INTEGER');
     // Legacy sessions have no accountable identity and cannot migrate into an administrator session.
