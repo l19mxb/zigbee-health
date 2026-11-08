@@ -21,7 +21,9 @@ const hash=value=>createHash('sha256').update(value).digest('hex');
 export class PushService{
   constructor(engine,{send=sendNotification}={}){this.e=engine;this.s=engine.s;this.send=send;this.delivering=false;}
   settings(){return {enabled:false,recovery:true,includeDeviceNames:false,...this.s.get('pushSettings')};}
-  status(){const keys=this.s.get('pushVapid');return {...this.settings(),publicOrigin:this.s.get('web')?.publicOrigin||'',publicKey:keys?.publicKey||null,simulation:this.e.demo,subscriptions:this.s.all('SELECT id,label,created_at,updated_at,disabled_at,last_success_at,last_error FROM push_subscriptions ORDER BY created_at DESC'),deliveries:this.s.all('SELECT id,subscription_id,kind,created_at,status,error,finished_at FROM push_outbox ORDER BY created_at DESC LIMIT 50')};}
+  status(userId=null,admin=true){const keys=this.s.get('pushVapid'),restricted=userId&&!admin;return {...this.settings(),publicOrigin:this.s.get('web')?.publicOrigin||'',publicKey:keys?.publicKey||null,simulation:this.e.demo,subscriptions:this.s.all('SELECT id,label,created_at,updated_at,disabled_at,last_success_at,last_error FROM push_subscriptions'+(restricted?' WHERE user_id=?':'')+' ORDER BY created_at DESC',...(restricted?[userId]:[])),deliveries:this.s.all('SELECT id,subscription_id,kind,created_at,status,error,finished_at FROM push_outbox'+(restricted?' WHERE subscription_id IN (SELECT id FROM push_subscriptions WHERE user_id=?)':'')+' ORDER BY created_at DESC LIMIT 50',...(restricted?[userId]:[]))};}
+  owned(id,userId,admin){const sub=this.s.one('SELECT * FROM push_subscriptions WHERE id=?',id);if(!sub||userId&&!admin&&sub.user_id!==userId)throw Error('Browser subscription not found');return sub;}
+  accountActive(sub){return sub.user_id?!!this.s.one('SELECT id FROM users WHERE id=? AND enabled=1',sub.user_id):!this.s.get('accountsInitialised');}
   configure(input,actor){
     if(typeof input.enabled!=='boolean'||typeof input.recovery!=='boolean'||typeof input.includeDeviceNames!=='boolean')throw Error('Invalid push settings');
     const origin=validatePublicOrigin(String(input.publicOrigin||'')),oldOrigin=this.s.get('web')?.publicOrigin||'';
@@ -34,19 +36,21 @@ export class PushService{
       this.s.event('push_settings_changed','App address or browser notification settings updated',{actor,at:this.e.now()});
     });
   }
-  subscribe(value,label,actor){
+  subscribe(value,label,actor,userId=null){
     if(this.e.demo||!this.settings().enabled)throw Error('Push delivery is disabled');
     const subscription=validateSubscription(value),endpointHash=hash(subscription.endpoint),now=this.e.now(),old=this.s.one('SELECT * FROM push_subscriptions WHERE endpoint_hash=?',endpointHash),id=old?.id||randomUUID();
+    if(old?.user_id&&old.user_id!==userId)throw Error('This browser belongs to another user; an administrator must remove its registration first');
+    if(userId&&!this.s.one('SELECT id FROM users WHERE id=? AND enabled=1',userId))throw Error('User account is unavailable');
     if(typeof label!=='string'||!label.trim()||label.length>80)throw Error('Enter a browser/device name of up to 80 characters');
     this.s.transaction(()=>{
-      this.s.run('INSERT INTO push_subscriptions(id,endpoint_hash,json,label,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(endpoint_hash) DO UPDATE SET json=excluded.json,label=excluded.label,updated_at=excluded.updated_at,disabled_at=NULL,last_error=NULL',id,endpointHash,this.s.seal(JSON.stringify(subscription)),label.trim(),now,now);
+      this.s.run('INSERT INTO push_subscriptions(id,endpoint_hash,json,label,created_at,updated_at,user_id) VALUES(?,?,?,?,?,?,?) ON CONFLICT(endpoint_hash) DO UPDATE SET json=excluded.json,label=excluded.label,updated_at=excluded.updated_at,disabled_at=NULL,last_error=NULL,user_id=excluded.user_id',id,endpointHash,this.s.seal(JSON.stringify(subscription)),label.trim(),now,now,userId);
       // Enrolment does not replay an existing alarm backlog. A future rearm has a new generation.
       for(const i of this.s.all('SELECT * FROM incidents WHERE processed_at IS NULL'))this.s.run("INSERT OR IGNORE INTO push_outbox VALUES(?,?,?,?,?,?,'suppressed','Predates browser enrolment',?)",randomUUID(),i.id,id,'alarm',i.rearm,now,now);
       this.s.event('push_browser_enabled','Browser notifications enabled for '+label.trim(),{actor,at:now});
     });return {id};
   }
-  remove(id,actor){
-    const sub=this.s.one('SELECT * FROM push_subscriptions WHERE id=?',id);if(!sub)throw Error('Browser subscription not found');
+  remove(id,actor,userId=null,admin=true){
+    const sub=this.owned(id,userId,admin);
     this.s.transaction(()=>{this.s.run('DELETE FROM push_outbox WHERE subscription_id=?',id);this.s.run('DELETE FROM push_subscriptions WHERE id=?',id);this.s.event('push_browser_removed','Browser notifications removed for '+sub.label,{actor,at:this.e.now()});});
   }
   eligible(i,kind,rearm){
@@ -58,14 +62,14 @@ export class PushService{
   }
   queue(){
     if(this.e.demo||!this.settings().enabled)return;
-    for(const sub of this.s.all('SELECT id FROM push_subscriptions WHERE disabled_at IS NULL'))for(const i of this.s.all('SELECT * FROM incidents WHERE processed_at IS NULL')){
+    for(const sub of this.s.all('SELECT id,user_id FROM push_subscriptions WHERE disabled_at IS NULL').filter(sub=>this.accountActive(sub)))for(const i of this.s.all('SELECT * FROM incidents WHERE processed_at IS NULL')){
       if(this.eligible(i,'alarm',i.rearm))this.s.run("INSERT OR IGNORE INTO push_outbox VALUES(?,?,?,?,?,?,'queued',NULL,NULL)",randomUUID(),i.id,sub.id,'alarm',i.rearm,this.e.now());
       if(this.settings().recovery&&this.eligible(i,'recovery',i.rearm)&&this.s.one("SELECT id FROM push_outbox WHERE subscription_id=? AND incident_id=? AND kind='alarm' AND status='accepted'",sub.id,i.id))this.s.run("INSERT OR IGNORE INTO push_outbox VALUES(?,?,?,?,?,?,'queued',NULL,NULL)",randomUUID(),i.id,sub.id,'recovery',i.rearm,this.e.now());
     }
   }
-  async test(id){
+  async test(id,userId=null,admin=true){
     if(this.e.demo||!this.settings().enabled)throw Error('Push delivery is disabled');
-    const sub=this.s.one('SELECT * FROM push_subscriptions WHERE id=? AND disabled_at IS NULL',id);if(!sub)throw Error('Browser is unavailable');
+    const sub=this.owned(id,userId,admin);if(sub.disabled_at||!this.accountActive(sub))throw Error('Browser is unavailable');
     if(this.s.one("SELECT id FROM push_outbox WHERE subscription_id=? AND kind='test' AND created_at>?",id,this.e.now()-60000))throw Error('Wait one minute before another test');
     const job={id:randomUUID(),incident_id:null,subscription_id:id,kind:'test',rearm:0,created_at:this.e.now()};
     this.s.run("INSERT INTO push_outbox VALUES(?,?,?,?,?,?,'queued',NULL,NULL)",job.id,null,id,'test',0,job.created_at);await this.deliver();
@@ -89,7 +93,7 @@ export class PushService{
       for(const job of this.s.all("SELECT * FROM push_outbox WHERE status='queued' ORDER BY created_at LIMIT 10")){
         if(this.stopping)break;
         const sub=this.s.one('SELECT * FROM push_subscriptions WHERE id=? AND disabled_at IS NULL',job.subscription_id),i=job.incident_id?this.s.one('SELECT * FROM incidents WHERE id=?',job.incident_id):null;
-        if(!sub||this.e.now()-job.created_at>300000||job.kind!=='test'&&!this.eligible(i,job.kind,job.rearm)){this.s.run("UPDATE push_outbox SET status='suppressed',finished_at=? WHERE id=?",this.e.now(),job.id);continue;}
+        if(!sub||!this.accountActive(sub)||this.e.now()-job.created_at>300000||job.kind!=='test'&&!this.eligible(i,job.kind,job.rearm)){this.s.run("UPDATE push_outbox SET status='suppressed',finished_at=? WHERE id=?",this.e.now(),job.id);continue;}
         this.s.run("UPDATE push_outbox SET status='delivering' WHERE id=?",job.id);
         try{
           const subscription=validateSubscription(JSON.parse(this.s.unseal(sub.json)));

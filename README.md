@@ -20,11 +20,13 @@ networks. Try the isolated simulation without connecting to a broker.
 - SMTP fault/recovery notifications with duplicate suppression and delivery history.
 - Installable PWA with browser push, individual browser removal and delivery history.
 - Optional MQTT broker connection monitoring and a bounded live topic log.
+- Individual user accounts with Administrator, Operator and Viewer roles, plus
+  per-person audit attribution and session revocation.
+- Light, Dark and System colour themes, remembered in each browser.
 - Editable **90-day default retention**. Working alarms, active shunts and current
   configuration survive history cleanup.
 
-Built with React, Vite, Node.js 24, SQLite, MQTT.js and Nodemailer. This early
-release uses one shared operator identity: **Local operator**.
+Built with React, Vite, Node.js 24, SQLite, MQTT.js and Nodemailer.
 
 ## Local use
 
@@ -54,7 +56,7 @@ uses port 18921 and proxies the API to port 18920.
 
 ```sh
 cp .env.example .env
-# Set a unique ZIGBEE_HEALTH_PASSWORD of at least 12 characters in .env.
+# Set a unique ZIGBEE_HEALTH_PASSWORD of 12–128 characters in .env.
 docker compose up --build -d
 ```
 
@@ -71,24 +73,77 @@ access; do not expose the unencrypted administrative interface to the internet.
 | `PORT` | `18920` | Native port; Compose uses `8080` internally |
 | `DATA_DIR` | `data/live` or `data/simulation` | Database/key directory |
 | `PUBLIC_HOST` | empty | Additional permitted browser hostname(s), comma separated |
-| `APP_PASSWORD` | empty | Native login password; required outside loopback |
+| `APP_PASSWORD` | empty | Initial `admin` password; required for first setup outside loopback |
 | `TZ` | `UTC` | IANA timezone for displayed timestamps, including DST |
 | `BIND_ADDRESS` | `127.0.0.1` | Compose host bind address |
 | `APP_PORT` | `18920` | Compose published port |
-| `ZIGBEE_HEALTH_PASSWORD` | required | Compose login password |
+| `ZIGBEE_HEALTH_PASSWORD` | required | Compose initial `admin` password |
 
-The shared password provides no per-person audit attribution. The actor is
-always Local operator.
+## Users, permissions and sign-in
+
+On first account setup, the app creates username **`admin`** with the configured
+`APP_PASSWORD` (or Compose's `ZIGBEE_HEALTH_PASSWORD`). When upgrading from the
+shared-password version to v0.4, use `admin` and the existing dashboard password.
+Existing identity-less sessions are signed out during migration. The database,
+device history and notification configuration remain in the same data directory.
+
+The environment password seeds the administrator **once**. After accounts exist,
+changing that variable does not change an account password or provide an alternate
+login. Use **Your account** to change your own password, or an administrator's
+**Users** screen to reset another account. Preserve a working administrator login
+and protect the data-directory backup.
+
+Administrators add accounts with an individual username, display name, password
+and role. New accounts default to Viewer. Usernames are case-insensitive and
+cannot be renamed; display names can be changed. Share initial or reset passwords
+privately. Each person can change their own password after signing in.
+
+| Role | Permissions |
+| --- | --- |
+| Administrator | Manage users, configuration, device records, alarms and shunts |
+| Operator | View health and reports; acknowledge/process alarms and manage shunts |
+| Viewer | View device health, alarms and reports |
+
+Every role can manage its own password and browser notification subscriptions.
+Server-side permission checks apply even if a client manually submits a request.
+Alarm acknowledgements, shunts and configuration changes record the acting
+username. Accounts are disabled rather than deleted, retaining audit attribution.
+Disabling an account ends its sessions, prevents login and stops its browser push
+delivery. At least one enabled administrator must remain; the app prevents
+disabling or demoting the last one.
+Re-enabling an account leaves its old browser subscriptions disabled; that person
+can enable notifications again from their browser after signing in.
+
+Administrators can reset passwords and **Sign out everywhere** for a selected
+account. A password or role change also revokes that account's existing sessions.
+Signing out normally revokes only the current session. Resetting credentials does
+not rewrite old audit events or other users' sign-ins.
 
 The login screen offers **Stay signed in for 30 days**, off by default. Without
 it, a session lasts up to 12 hours and ends on an app restart. With it, a session
 survives restarts for an absolute 30-day period; activity does not extend expiry.
-Sign out revokes the current session immediately. Changing `APP_PASSWORD` and
-restarting invalidates remembered sessions. Only hashes of random session tokens
-are stored in SQLite; the password and raw tokens are never saved there. Cookies
-are HttpOnly and SameSite=Strict, with Secure on the configured HTTPS origin.
-Cloudflare Access has its own session duration and may require a separate login.
-Backups contain session hashes and expiry records, so treat them as private.
+Each session belongs to one enabled user and checks that user's current access.
+Account passwords use individually salted password hashes. Only hashes of random
+session tokens are stored in SQLite; plaintext passwords and raw session tokens
+are not saved there. Cookies are HttpOnly and SameSite=Strict, with Secure on the
+configured HTTPS origin. Account and current-access records survive history
+retention. Backups include private password hashes and session records.
+
+Cloudflare Access or another authenticated proxy is a separate outer gate. Adding
+an app user **does not** add an identity to the proxy's allowlist or grant remote
+access through it. Approve and configure any extra proxy identities separately.
+Proxy sessions have their own duration and can require a separate login.
+
+### Appearance
+
+Choose **Light**, **Dark** or **System** from the theme control. System follows
+the operating system's colour preference. The selected preference is stored in
+that browser and applies to the login page, alarm viewer, reports and dialogs;
+changing it does not change another user's browser or the monitoring settings.
+
+Security-device areas, arming/disarming schedules and MQTT-triggered security
+actions are planned separately. This release does not implement them and the
+collector continues to publish no device commands.
 
 ## Device identity and lifecycle
 
@@ -161,7 +216,7 @@ usable as a dashboard but cannot enrol normal browser push subscriptions.
 
 1. Route an HTTPS hostname through your reverse proxy or Cloudflare Tunnel to
    the existing dashboard HTTP origin. Preserve the public `Host` header. Keep
-   the app password and any existing access protection enabled.
+   app account authentication and any existing access protection enabled.
 2. In **Configuration → App & notifications**, save that root HTTPS address
    (for example `https://health.example.test`) and enable push delivery. This
    also permits the hostname at the app. Public-host sessions use Secure cookies.
@@ -185,8 +240,11 @@ push service's acceptance does not prove handset delivery. Messages expire after
 five minutes; ambiguous outcomes are recorded without automatic retries. Expired
 subscriptions are disabled, and can be enabled again from the browser.
 
-Changing the HTTPS app address disables existing subscriptions. Signing out does
-not disable push: remove the browser in notification settings to stop it. Android
+Changing the HTTPS app address disables existing subscriptions. Subscriptions
+belong to the account that enrolled them; users manage their own browsers and
+administrators can manage all browsers. Signing out does not disable push: remove
+the browser in notification settings to stop it. Disabling its account also
+stops push delivery. Android
 permissions, battery restrictions and connectivity affect delivery. Keep SMTP as
 a separate fallback where desired. Simulation cannot enrol or send real push.
 
@@ -207,9 +265,10 @@ transitions. Cleanup runs hourly. Eligible old history expires under the retenti
 threshold; working alarms, active shunts and configuration remain independent.
 Backup retention is separate.
 
-Passwords are encrypted with a separate `secrets.key`. Protect the whole data
-directory: the database and key together permit decryption. Never commit data,
-`.env`, backups or real diagnostics.
+Broker/SMTP credentials and browser subscription secrets are encrypted with a
+separate `secrets.key`; account passwords are stored as salted hashes. Protect the
+whole data directory: the database and key together permit credential decryption.
+Never commit data, `.env`, backups or real diagnostics.
 
 Create an explicit online backup to a new directory:
 

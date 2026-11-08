@@ -29,7 +29,17 @@ export class Store {
     this.db.exec(`CREATE TABLE IF NOT EXISTS push_subscriptions(id TEXT PRIMARY KEY,endpoint_hash TEXT NOT NULL UNIQUE,json TEXT NOT NULL,label TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,disabled_at INTEGER,last_success_at INTEGER,last_error TEXT);
       CREATE TABLE IF NOT EXISTS push_outbox(id TEXT PRIMARY KEY,incident_id TEXT,subscription_id TEXT NOT NULL,kind TEXT NOT NULL,rearm INTEGER NOT NULL,created_at INTEGER NOT NULL,status TEXT NOT NULL,error TEXT,finished_at INTEGER,UNIQUE(incident_id,subscription_id,kind,rearm));
       CREATE INDEX IF NOT EXISTS push_outbox_status ON push_outbox(status,created_at);`);
-    this.db.exec('CREATE TABLE IF NOT EXISTS auth_sessions(token_hash TEXT PRIMARY KEY,credential_tag TEXT NOT NULL,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS auth_session_expiry ON auth_sessions(expires_at)');
+    this.db.exec(`CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,username TEXT NOT NULL COLLATE NOCASE UNIQUE,display_name TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('admin','operator','viewer')),enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),password_salt TEXT NOT NULL,password_hash TEXT NOT NULL,auth_version INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,last_login_at INTEGER);
+      CREATE TABLE IF NOT EXISTS auth_sessions(token_hash TEXT PRIMARY KEY,credential_tag TEXT NOT NULL,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,user_id TEXT,auth_version INTEGER);
+      CREATE INDEX IF NOT EXISTS auth_session_expiry ON auth_sessions(expires_at)`);
+    const sessionColumns=this.all('PRAGMA table_info(auth_sessions)').map(c=>c.name);
+    if(!sessionColumns.includes('user_id'))this.db.exec('ALTER TABLE auth_sessions ADD COLUMN user_id TEXT');
+    if(!sessionColumns.includes('auth_version'))this.db.exec('ALTER TABLE auth_sessions ADD COLUMN auth_version INTEGER');
+    // Legacy sessions have no accountable identity and cannot migrate into an administrator session.
+    this.run('DELETE FROM auth_sessions WHERE user_id IS NULL OR auth_version IS NULL');
+    this.db.exec('CREATE INDEX IF NOT EXISTS auth_session_user ON auth_sessions(user_id)');
+    if(!this.all('PRAGMA table_info(push_subscriptions)').some(c=>c.name==='user_id'))this.db.exec('ALTER TABLE push_subscriptions ADD COLUMN user_id TEXT');
+    this.db.exec('CREATE INDEX IF NOT EXISTS push_subscription_user ON push_subscriptions(user_id)');
     this.run("UPDATE push_outbox SET status='uncertain',error='Service stopped during delivery; no automatic retry' WHERE status='delivering'");
     this.db.prepare("UPDATE outbox SET status='uncertain',error='Service stopped during delivery; review before resending' WHERE status='delivering'").run();
     if(!this.get('thresholds'))this.set('thresholds',defaults);

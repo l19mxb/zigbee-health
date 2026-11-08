@@ -1,19 +1,25 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import {validateThresholds} from './store.mjs';
 import {uid} from './engine.mjs';
 import {PushService} from './push.mjs';
 import {validateTopics} from './topic-log.mjs';
 import {Sessions} from './sessions.mjs';
+import {Accounts} from './accounts.mjs';
+
+const previewUser={id:'local-preview',username:'admin',displayName:'Local preview',role:'admin',enabled:true};
+const adminChanges=new Set(['/api/users','/api/users/update','/api/users/reset-password','/api/users/revoke-sessions','/api/thresholds','/api/device','/api/networks','/api/email','/api/push/settings','/api/devices/retire','/api/devices/restore','/api/devices/delete-history','/api/devices/link','/api/devices/unlink']);
+const operatorChanges=new Set(['/api/alarms/acknowledge','/api/alarms/process','/api/shunts','/api/shunts/cancel']);
+const personalChanges=new Set(['/api/logout','/api/account/password','/api/push/subscribe','/api/push/remove','/api/push/test']);
+const permissionsFor=user=>({configure:user.role==='admin',manageUsers:user.role==='admin',operateAlarms:['admin','operator'].includes(user.role)});
 
 export function createApp(engine,{collectors=null,push=null,password='',host='127.0.0.1',publicHost='',dist=path.resolve('dist')}={}){
-  if(!['127.0.0.1','localhost','::1'].includes(host)&&password.length<12)throw Error('Set APP_PASSWORD to at least 12 characters before LAN hosting');
+  const accounts=new Accounts(engine.s,{password});
+  if(!['127.0.0.1','localhost','::1'].includes(host)&&!accounts.active())throw Error('Set APP_PASSWORD to at least 12 characters before LAN hosting');
   push=push||new PushService(engine);
-  const sessions=new Sessions(engine.s,password),attempts=new Map(),salt=crypto.randomBytes(16),hash=password?crypto.scryptSync(password,salt,32):null;
+  const sessions=new Sessions(engine.s,accounts),attempts=new Map();
   const json=(res,status,data)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(data));};
-  const actor='Local operator';
   return http.createServer(async(req,res)=>{
     try{
       const url=new URL(req.url,'http://'+req.headers.host),route=url.pathname;
@@ -28,22 +34,46 @@ export function createApp(engine,{collectors=null,push=null,password='',host='12
       const token=req.headers.cookie?.match(/(?:^|; )zh_session=([a-f0-9]{64})/)?.[1];
       if(route==='/api/login'&&req.method==='POST'){
         if(body.rememberMe!==undefined&&typeof body.rememberMe!=='boolean')return json(res,400,{error:'Stay signed in must be on or off'});
-        const key=req.socket.remoteAddress,record=attempts.get(key)||{count:0,until:Date.now()+900000};if(record.until<Date.now()){record.count=0;record.until=Date.now()+900000;}if(record.count>=8)return json(res,429,{error:'Too many attempts. Try again later.'});record.count++;attempts.set(key,record);
-        const supplied=String(body.password||'');if(supplied.length>512)return json(res,400,{error:'Invalid password'});
-        if(hash&&!crypto.timingSafeEqual(hash,crypto.scryptSync(supplied,salt,32)))return json(res,401,{error:'Incorrect password'});
-        const issued=sessions.issue(body.rememberMe===true);sessions.revoke(token);res.setHeader('Set-Cookie','zh_session='+issued.token+'; HttpOnly; SameSite=Strict; Path=/; Max-Age='+issued.seconds+(secureCookie?'; Secure':''));return json(res,200,{ok:true});
+        const username=body.username===undefined?'admin':body.username;
+        if(typeof username!=='string'||username.length>64||typeof body.password!=='string'||body.password.length>128)return json(res,400,{error:'Invalid username or password'});
+        const now=Date.now();for(const [key,value] of attempts)if(value.until<=now)attempts.delete(key);
+        const keys=[[req.socket.remoteAddress,80],[req.socket.remoteAddress+':'+username.trim().toLowerCase(),8]];
+        if(attempts.size>4096)return json(res,429,{error:'Too many attempts. Try again later.'});
+        for(const [key,max] of keys){const record=attempts.get(key)||{count:0,until:now+900000};if(record.count>=max)return json(res,429,{error:'Too many attempts. Try again later.'});record.count++;attempts.set(key,record);}
+        const user=accounts.active()?accounts.authenticate(username,body.password):previewUser;
+        if(!user)return json(res,401,{error:'Incorrect username or password'});
+        attempts.delete(keys[1][0]);
+        if(!accounts.active())return json(res,200,{ok:true,user});
+        const issued=sessions.issue(body.rememberMe===true,user);sessions.revoke(token);res.setHeader('Set-Cookie','zh_session='+issued.token+'; HttpOnly; SameSite=Strict; Path=/; Max-Age='+issued.seconds+(secureCookie?'; Secure':''));return json(res,200,{ok:true,user});
       }
-      if(route.startsWith('/api/')&&hash&&!sessions.valid(token))return json(res,401,{error:'Sign in to Zigbee Health'});
+      const user=accounts.active()?sessions.current(token):previewUser,admin=user?.role==='admin',actor=user?.username;
+      if(route.startsWith('/api/')&&!user)return json(res,401,{error:'Sign in to Zigbee Health'});
+      if(route.startsWith('/api/')&&((req.method==='GET'&&(route==='/api/users'||route==='/api/network-log')&&!admin)||(req.method!=='GET'&&((adminChanges.has(route)&&!admin)||(operatorChanges.has(route)&&!permissionsFor(user).operateAlarms)||(!admin&&!operatorChanges.has(route)&&!personalChanges.has(route))))))return json(res,403,{error:'Your role does not permit this action'});
       if(route==='/api/logout'&&req.method==='POST'){sessions.revoke(token);res.setHeader('Set-Cookie','zh_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'+(secureCookie?'; Secure':''));return json(res,200,{ok:true});}
-      if(route==='/api/state'&&req.method==='GET')return json(res,200,{...engine.snapshot(),traffic:collectors?.traffic?.()||{},authenticationRequired:!!hash});
-      if(route==='/api/push'&&req.method==='GET')return json(res,200,push.status());
+      if(route==='/api/state'&&req.method==='GET'){
+        const state=engine.snapshot();
+        if(!admin){state.networks=state.networks.map(({id,label,mode,status,connected,enabled,bridgeState,subscriptionStatus})=>({id,label,mode,status,connected,enabled,bridgeState,subscriptionStatus}));state.email={enabled:state.email.enabled};state.deliveries=[];state.events=state.events.filter(event=>!event.type.startsWith('user_')&&!event.type.startsWith('account_')&&!['administrator_created','password_changed','password_reset'].includes(event.type));}
+        return json(res,200,{...state,traffic:admin?collectors?.traffic?.()||{}:{},authenticationRequired:accounts.active(),currentUser:user,permissions:permissionsFor(user)});
+      }
+      if(route==='/api/users'&&req.method==='GET')return json(res,200,{users:accounts.list(),roles:['admin','operator','viewer'],accountsEnabled:accounts.active()});
+      if(route.startsWith('/api/users')&&req.method==='POST'&&!accounts.active())throw Error('Configure an administrator password before managing users');
+      if(route==='/api/users'&&req.method==='POST')return json(res,201,{user:accounts.create(body,actor)});
+      if(route==='/api/users/update'&&req.method==='POST')return json(res,200,{user:accounts.update(body,actor)});
+      if(route==='/api/users/reset-password'&&req.method==='POST'){accounts.resetPassword(body,actor);return json(res,200,{ok:true});}
+      if(route==='/api/users/revoke-sessions'&&req.method==='POST'){accounts.revokeSessions(body.id,actor);return json(res,200,{ok:true});}
+      if(route==='/api/account/password'&&req.method==='POST'){
+        if(!accounts.active())throw Error('Password changes are unavailable in the unauthenticated preview');
+        const key='password:'+user.id,record=attempts.get(key)||{count:0,until:Date.now()+900000};if(record.until<=Date.now()){record.count=0;record.until=Date.now()+900000;}if(record.count>=8)return json(res,429,{error:'Too many attempts. Try again later.'});record.count++;attempts.set(key,record);
+        accounts.changePassword(user.id,body.currentPassword,body.newPassword);sessions.revokeUser(user.id);res.setHeader('Set-Cookie','zh_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'+(secureCookie?'; Secure':''));return json(res,200,{ok:true});
+      }
+      if(route==='/api/push'&&req.method==='GET')return json(res,200,push.status(accounts.active()?user.id:null,admin));
       if(route==='/api/push/settings'&&req.method==='POST'){push.configure(body,actor);return json(res,200,{ok:true});}
       if(route==='/api/push/subscribe'&&req.method==='POST'){
         const origin=engine.s.get('web')?.publicOrigin;if(!origin||req.headers.origin!==origin)throw Error('Enable browser notifications from the configured HTTPS app address');
-        return json(res,201,push.subscribe(body.subscription,body.label,actor));
+        return json(res,201,push.subscribe(body.subscription,body.label,actor,accounts.active()?user.id:null));
       }
-      if(route==='/api/push/remove'&&req.method==='POST'){push.remove(body.id,actor);return json(res,200,{ok:true});}
-      if(route==='/api/push/test'&&req.method==='POST')return json(res,200,await push.test(body.id));
+      if(route==='/api/push/remove'&&req.method==='POST'){push.remove(body.id,actor,accounts.active()?user.id:null,admin);return json(res,200,{ok:true});}
+      if(route==='/api/push/test'&&req.method==='POST')return json(res,200,await push.test(body.id,accounts.active()?user.id:null,admin));
       if(route==='/api/network-log'&&req.method==='GET'){
         const id=url.searchParams.get('network');if(!engine.s.network(id))throw Error('Network not found');
         return json(res,200,{entries:collectors?.logs?.read(id)||[],limit:200,persistent:false});
