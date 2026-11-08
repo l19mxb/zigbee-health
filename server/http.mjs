@@ -6,11 +6,12 @@ import {validateThresholds} from './store.mjs';
 import {uid} from './engine.mjs';
 import {PushService} from './push.mjs';
 import {validateTopics} from './topic-log.mjs';
+import {Sessions} from './sessions.mjs';
 
 export function createApp(engine,{collectors=null,push=null,password='',host='127.0.0.1',publicHost='',dist=path.resolve('dist')}={}){
   if(!['127.0.0.1','localhost','::1'].includes(host)&&password.length<12)throw Error('Set APP_PASSWORD to at least 12 characters before LAN hosting');
   push=push||new PushService(engine);
-  const sessions=new Map(),attempts=new Map(),salt=crypto.randomBytes(16),hash=password?crypto.scryptSync(password,salt,32):null;
+  const sessions=new Sessions(engine.s,password),attempts=new Map(),salt=crypto.randomBytes(16),hash=password?crypto.scryptSync(password,salt,32):null;
   const json=(res,status,data)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(data));};
   const actor='Local operator';
   return http.createServer(async(req,res)=>{
@@ -24,15 +25,16 @@ export function createApp(engine,{collectors=null,push=null,password='',host='12
       if(route==='/api/health')return json(res,200,{status:'ready',mode:engine.demo?'simulation':'live',mqttPublications:0});
       if(req.method!=='GET'&&req.headers.origin&&new URL(req.headers.origin).host!==req.headers.host)return json(res,403,{error:'Cross-origin changes are not allowed'});
       let body={};if(['POST','PUT','DELETE'].includes(req.method)){let size=0,parts=[];for await(const chunk of req){size+=chunk.length;if(size>65536)return json(res,413,{error:'Request is too large'});parts.push(chunk);}try{body=JSON.parse(Buffer.concat(parts).toString()||'{}');}catch{return json(res,400,{error:'Invalid JSON'});}if(!body||Array.isArray(body)||typeof body!=='object')return json(res,400,{error:'Expected a JSON object'});}
+      const token=req.headers.cookie?.match(/(?:^|; )zh_session=([a-f0-9]{64})/)?.[1];
       if(route==='/api/login'&&req.method==='POST'){
+        if(body.rememberMe!==undefined&&typeof body.rememberMe!=='boolean')return json(res,400,{error:'Stay signed in must be on or off'});
         const key=req.socket.remoteAddress,record=attempts.get(key)||{count:0,until:Date.now()+900000};if(record.until<Date.now()){record.count=0;record.until=Date.now()+900000;}if(record.count>=8)return json(res,429,{error:'Too many attempts. Try again later.'});record.count++;attempts.set(key,record);
         const supplied=String(body.password||'');if(supplied.length>512)return json(res,400,{error:'Invalid password'});
         if(hash&&!crypto.timingSafeEqual(hash,crypto.scryptSync(supplied,salt,32)))return json(res,401,{error:'Incorrect password'});
-        const token=crypto.randomBytes(32).toString('hex');sessions.set(token,Date.now()+12*3600000);res.setHeader('Set-Cookie','zh_session='+token+'; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200'+(secureCookie?'; Secure':''));return json(res,200,{ok:true});
+        const issued=sessions.issue(body.rememberMe===true);sessions.revoke(token);res.setHeader('Set-Cookie','zh_session='+issued.token+'; HttpOnly; SameSite=Strict; Path=/; Max-Age='+issued.seconds+(secureCookie?'; Secure':''));return json(res,200,{ok:true});
       }
-      const token=req.headers.cookie?.match(/(?:^|; )zh_session=([a-f0-9]{64})/)?.[1];
-      if(route.startsWith('/api/')&&hash&&(!token||!sessions.has(token)||sessions.get(token)<Date.now()))return json(res,401,{error:'Sign in to Zigbee Health'});
-      if(route==='/api/logout'&&req.method==='POST'){sessions.delete(token);res.setHeader('Set-Cookie','zh_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'+(secureCookie?'; Secure':''));return json(res,200,{ok:true});}
+      if(route.startsWith('/api/')&&hash&&!sessions.valid(token))return json(res,401,{error:'Sign in to Zigbee Health'});
+      if(route==='/api/logout'&&req.method==='POST'){sessions.revoke(token);res.setHeader('Set-Cookie','zh_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'+(secureCookie?'; Secure':''));return json(res,200,{ok:true});}
       if(route==='/api/state'&&req.method==='GET')return json(res,200,{...engine.snapshot(),traffic:collectors?.traffic?.()||{},authenticationRequired:!!hash});
       if(route==='/api/push'&&req.method==='GET')return json(res,200,push.status());
       if(route==='/api/push/settings'&&req.method==='POST'){push.configure(body,actor);return json(res,200,{ok:true});}

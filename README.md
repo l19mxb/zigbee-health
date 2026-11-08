@@ -80,6 +80,16 @@ access; do not expose the unencrypted administrative interface to the internet.
 The shared password provides no per-person audit attribution. The actor is
 always Local operator.
 
+The login screen offers **Stay signed in for 30 days**, off by default. Without
+it, a session lasts up to 12 hours and ends on an app restart. With it, a session
+survives restarts for an absolute 30-day period; activity does not extend expiry.
+Sign out revokes the current session immediately. Changing `APP_PASSWORD` and
+restarting invalidates remembered sessions. Only hashes of random session tokens
+are stored in SQLite; the password and raw tokens are never saved there. Cookies
+are HttpOnly and SameSite=Strict, with Secure on the configured HTTPS origin.
+Cloudflare Access has its own session duration and may require a separate login.
+Backups contain session hashes and expiry records, so treat them as private.
+
 ## Device identity and lifecycle
 
 Records use their network ID and Zigbee IEEE address. A friendly-name change on

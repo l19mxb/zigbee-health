@@ -29,6 +29,7 @@ export class Store {
     this.db.exec(`CREATE TABLE IF NOT EXISTS push_subscriptions(id TEXT PRIMARY KEY,endpoint_hash TEXT NOT NULL UNIQUE,json TEXT NOT NULL,label TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,disabled_at INTEGER,last_success_at INTEGER,last_error TEXT);
       CREATE TABLE IF NOT EXISTS push_outbox(id TEXT PRIMARY KEY,incident_id TEXT,subscription_id TEXT NOT NULL,kind TEXT NOT NULL,rearm INTEGER NOT NULL,created_at INTEGER NOT NULL,status TEXT NOT NULL,error TEXT,finished_at INTEGER,UNIQUE(incident_id,subscription_id,kind,rearm));
       CREATE INDEX IF NOT EXISTS push_outbox_status ON push_outbox(status,created_at);`);
+    this.db.exec('CREATE TABLE IF NOT EXISTS auth_sessions(token_hash TEXT PRIMARY KEY,credential_tag TEXT NOT NULL,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS auth_session_expiry ON auth_sessions(expires_at)');
     this.run("UPDATE push_outbox SET status='uncertain',error='Service stopped during delivery; no automatic retry' WHERE status='delivering'");
     this.db.prepare("UPDATE outbox SET status='uncertain',error='Service stopped during delivery; review before resending' WHERE status='delivering'").run();
     if(!this.get('thresholds'))this.set('thresholds',defaults);
