@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "Zigbee Health",
-  "short_name": "Zigbee Health",
+  "name": "Zigbee Console",
+  "short_name": "Zigbee Console",
   "description": "Zigbee and MQTT health monitoring and alarms",
   "start_url": "/",
   "scope": "/",

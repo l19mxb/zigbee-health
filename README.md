@@ -1,4 +1,4 @@
-# Zigbee Health
+# Zigbee Console
 
 A self-hosted dashboard for device health and area-based Zigbee security across
 multiple Zigbee2MQTT networks. Try the isolated simulation without connecting
@@ -26,6 +26,8 @@ to a broker.
 - Light, Dark and System colour themes, remembered in each browser.
 - Residential-style security panel with areas, device zones, Home/Away modes,
   entry/exit delays, bypasses, latched alarm memory and weekly schedules.
+- Floor plans with live Zigbee device markers, Health and Security layers,
+  Alarm Dash layout import, and a map-only tablet view.
 - Responsive tablet keypad with area LEDs, not-ready zone browsing, code-free
   Away arming and personal four-digit PIN disarming.
 - **Force Arm** on the keypad reviews and bypasses currently open zones for
@@ -43,6 +45,25 @@ to a broker.
   configuration survive history cleanup.
 
 Built with React, Vite, Node.js 24, SQLite, MQTT.js and Nodemailer.
+
+## Floor Plan
+
+Open **Floor Plan** in the dashboard. Choose **Edit floor plan** to add a floor,
+upload a PNG, JPEG or WebP drawing, and place devices on the map. Search the
+inventory for a device, select it, and tap its position. Drag markers to move
+them and select **Save floor plan** when finished. Editors can also link a
+device marker to an imported door or window.
+
+To reuse a drawing from Alarm Dash, save its `/api/floorplan/layout` response
+as a JSON file and choose **Import Alarm Dash JSON**. This brings across the
+drawings, room outlines, labels, and door and window positions. Assign the
+devices using the Zigbee inventory after import. Imports and edits are saved
+with the app database. Keep exported layout files private.
+
+Use **Health** to locate devices reporting offline, low battery or poor link
+quality. Use **Security** to see configured zone states and alarm details. The
+available layers follow your account permissions. **Map only** provides a
+larger view for a tablet or wall display.
 
 ## Local use
 

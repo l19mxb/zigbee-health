@@ -11,6 +11,6 @@ async function kioskRequest(path,body,signal){
   return data;
 }
 export default function KioskApp(){
-  useEffect(()=>{const previous=document.title;document.title='Local keypad · Zigbee Health';return()=>{document.title=previous;};},[]);
+  useEffect(()=>{const previous=document.title;document.title='Local keypad · Zigbee Console';return()=>{document.title=previous;};},[]);
   return <main className="kiosk-page"><Keypad kiosk requestApi={kioskRequest}/></main>;
 }

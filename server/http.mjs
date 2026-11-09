@@ -10,6 +10,7 @@ import {Accounts,permissionKeys,hasPermission} from './accounts.mjs';
 import {SecurityEngine} from './security.mjs';
 import {Keypad,KeypadError} from './keypad.mjs';
 import {Kiosk} from './kiosk.mjs';
+import {FloorPlan,FloorPlanError,floorPlanBodyLimit,floorPlanPermissions} from './floor-plan.mjs';
 
 const previewUser={id:'local-preview',username:'admin',displayName:'Local preview',role:'admin',enabled:true};
 const adminChanges=new Set(['/api/users','/api/users/update','/api/users/reset-password','/api/users/revoke-sessions','/api/users/keypad','/api/kiosk/settings']);
@@ -24,6 +25,7 @@ const permissionsFor=user=>({...Object.fromEntries(permissionKeys.map(key=>[key,
 export function createApp(engine,{collectors=null,push=null,security=null,securityActions=null,keypad=null,kiosk=null,password='',host='127.0.0.1',publicHost='',dist=path.resolve('dist')}={}){
   const accounts=new Accounts(engine.s,{password});
   security=security||new SecurityEngine(engine.s,{demo:engine.demo,clock:()=>engine.now(),timezone:engine.timezone});
+  const floorPlan=new FloorPlan(engine,security);
   keypad=keypad||new Keypad(engine.s,security,accounts,{clock:()=>engine.now()});
   const allowedHosts=(origin=engine.s.get('web')?.publicOrigin||'')=>new Set(['127.0.0.1','localhost','[::1]',host,...String(publicHost).split(',').map(x=>x.trim()),...(origin?[new URL(origin).hostname]:[])].filter(Boolean));
   kiosk=kiosk||new Kiosk(keypad,{recognizesOrigin:origin=>allowedHosts().has(new URL(origin).hostname),clock:()=>engine.now()});
@@ -53,8 +55,35 @@ export function createApp(engine,{collectors=null,push=null,security=null,securi
         const file=path.join(dist,'index.html');if(!fs.existsSync(file))return json(res,503,{error:'Build the frontend first'});res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});return fs.createReadStream(file).pipe(res);
       }
       if(req.method!=='GET'&&req.headers.origin&&new URL(req.headers.origin).host!==req.headers.host)return json(res,403,{error:'Cross-origin changes are not allowed'});
-      let body={};if(['POST','PUT','DELETE'].includes(req.method)){let size=0,parts=[];for await(const chunk of req){size+=chunk.length;if(size>65536)return json(res,413,{error:'Request is too large'});parts.push(chunk);}try{body=JSON.parse(Buffer.concat(parts).toString()||'{}');}catch{return json(res,400,{error:'Invalid JSON'});}if(!body||Array.isArray(body)||typeof body!=='object')return json(res,400,{error:'Expected a JSON object'});}
       const token=req.headers.cookie?.match(/(?:^|; )zh_session=([a-f0-9]{64})/)?.[1];
+      if(route==='/api/floor-plan'){
+        const floorUser=()=>accounts.active()?sessions.current(token):previewUser;
+        const user=floorUser();
+        if(!user)return json(res,401,{error:'Sign in to Zigbee Console'});
+        const permissions=floorPlanPermissions(user);
+        if(!permissions.health&&!permissions.security)return json(res,403,{error:'Health Monitor or Security access is required'});
+        if(req.method==='GET')return json(res,200,floorPlan.state(permissions,url.searchParams.get('status')==='1'));
+        if(req.method!=='POST')return json(res,405,{error:'Method not allowed'});
+        if(!permissions.edit)return json(res,403,{error:'Floor plan editing is not permitted'});
+        if(req.headers['sec-fetch-site']&&req.headers['sec-fetch-site']!=='same-origin')return json(res,403,{error:'Cross-origin changes are not allowed'});
+        if(!/^application\/json(?:\s*;|\s*$)/i.test(req.headers['content-type']||''))return json(res,415,{error:'Send the floor plan as JSON'});
+        if(Number(req.headers['content-length'])>floorPlanBodyLimit)return json(res,413,{error:'Floor plan request exceeds 8 MiB'});
+        let size=0;
+        const parts=[];
+        for await(const chunk of req.iterator({destroyOnReturn:false})){
+          size+=chunk.length;
+          if(size>floorPlanBodyLimit){req.resume();return json(res,413,{error:'Floor plan request exceeds 8 MiB'});}
+          parts.push(chunk);
+        }
+        const freshUser=floorUser();
+        if(!freshUser)return json(res,401,{error:'Sign in to Zigbee Console'});
+        const freshPermissions=floorPlanPermissions(freshUser);
+        if(!freshPermissions.edit)return json(res,403,{error:'Floor plan editing is not permitted'});
+        let input;
+        try{input=JSON.parse(Buffer.concat(parts).toString());}catch{return json(res,400,{error:'Invalid JSON'});}
+        return json(res,200,floorPlan.save(input,freshPermissions,freshUser.username));
+      }
+      let body={};if(['POST','PUT','DELETE'].includes(req.method)){let size=0,parts=[];for await(const chunk of req){size+=chunk.length;if(size>65536)return json(res,413,{error:'Request is too large'});parts.push(chunk);}try{body=JSON.parse(Buffer.concat(parts).toString()||'{}');}catch{return json(res,400,{error:'Invalid JSON'});}if(!body||Array.isArray(body)||typeof body!=='object')return json(res,400,{error:'Expected a JSON object'});}
       if(route==='/api/login'&&req.method==='POST'){
         if(body.rememberMe!==undefined&&typeof body.rememberMe!=='boolean')return json(res,400,{error:'Stay signed in must be on or off'});
         const username=body.username===undefined?'admin':body.username;
@@ -184,6 +213,6 @@ export function createApp(engine,{collectors=null,push=null,security=null,securi
       const relative=decodeURIComponent(route).replace(/^\/+/,'');const candidate=path.resolve(dist,relative||'index.html');if(candidate!==dist&&!candidate.startsWith(dist+path.sep))return json(res,403,{error:'Invalid path'});
       const file=fs.existsSync(candidate)&&fs.statSync(candidate).isFile()?candidate:path.join(dist,'index.html');if(!fs.existsSync(file))return json(res,503,{error:'Build the frontend first'});
       const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.woff2':'font/woff2','.png':'image/png','.webmanifest':'application/manifest+json'}[path.extname(file)]||'application/octet-stream';if(path.basename(file)==='sw.js')res.setHeader('Service-Worker-Allowed','/');res.writeHead(200,{'Content-Type':mime,'Cache-Control':path.extname(file)==='.html'||path.basename(file)==='sw.js'?'no-cache':'public,max-age=3600'});fs.createReadStream(file).pipe(res);
-    }catch(e){if(!res.headersSent){if(e instanceof KeypadError&&e.retryAfter)res.setHeader('Retry-After',String(e.retryAfter));json(res,e instanceof KeypadError?e.statusCode:400,{error:e.message||'Request failed'});}else res.end();}
+    }catch(e){if(!res.headersSent){if(e instanceof KeypadError&&e.retryAfter)res.setHeader('Retry-After',String(e.retryAfter));json(res,e instanceof KeypadError||e instanceof FloorPlanError?e.statusCode:400,{error:e.message||'Request failed'});}else res.end();}
   });
 }
