@@ -11,7 +11,7 @@ const memberIds=zone=>Array.isArray(zone?.areaIds)&&zone.areaIds.length?zone.are
 const editableArea=area=>area?.mode==='disarmed'&&!['exit_delay','entry_delay'].includes(area.status);
 const initial=(kind,item,state,areaId)=>{
   if(kind==='area')return {name:'',entryDelaySec:30,exitDelaySec:45,enabled:true,...item};
-  if(kind==='zone')return {name:'',deviceId:'',property:'contact',operator:'eq',value:false,type:'instant',homeBypass:false,enabled:true,freshnessMin:1500,...item,areaIds:item?memberIds(item):[areaId||state.areas.find(editableArea)?.id].filter(Boolean)};
+  if(kind==='zone')return {name:'',deviceId:'',property:'contact',operator:'eq',value:false,type:'instant',homeBypass:false,enabled:true,freshnessMin:10080,...item,areaIds:item?memberIds(item):[areaId||state.areas.find(editableArea)?.id].filter(Boolean)};
   if(kind==='schedule')return {name:'',areaId:areaId||state.areas[0]?.id||'',days:[1,2,3,4,5],time:'22:00',timezone:state.timezone||'UTC',mode:'away',enabled:false,...item};
   return {name:'',areaId:areaId||state.areas[0]?.id||'',kind:'mqtt',networkId:state.networks[0]?.id||'',topic:'security/alerts',payloadTemplate:payloadExample,subject:'Security alarm: {{area}}',text:'Security alarm in {{area}}.\nZone: {{zone}}\nDevice: {{device}}\nMode: {{mode}}\nTime: {{timestamp}}',subscriptionIds:[],enabled:false,...item};
 };
@@ -114,7 +114,7 @@ export function SecurityForm({kind,item,state,areaId,onClose,onSave,onAccount}){
       <Field label="Zone type"><select value={draft.type} onChange={e=>change('type',e.target.value)}><option value="instant">Instant</option><option value="entry">Entry</option></select></Field>
       <Check checked={draft.homeBypass} onChange={value=>change('homeBypass',value)}>Bypass in Home mode</Check>
       <Check checked={draft.enabled} onChange={value=>change('enabled',value)}>Zone enabled</Check>
-      <details className="security-advanced"><summary>Advanced zone settings</summary><Field label="Reading timeout" type="number" min={1} max={43200} unit="minutes" required value={draft.freshnessMin} onChange={e=>change('freshnessMin',Number(e.target.value))} hint="An older reading makes the zone unknown and blocks arming. Choose a period appropriate for this sensor's reporting interval."/></details>
+      <details className="security-advanced"><summary>Advanced zone settings</summary><Field label="Reading timeout" type="number" min={1} max={43200} unit="minutes" required value={draft.freshnessMin} onChange={e=>change('freshnessMin',Number(e.target.value))} hint="New zones default to 7 days. An older reading makes the zone unknown and blocks arming."/></details>
       <p className="security-form-footnote">Only a fresh device activation can raise an alarm. The zone waits for a fresh reading before it is ready to arm.</p>
     </>:null}
     {kind==='schedule'?<>

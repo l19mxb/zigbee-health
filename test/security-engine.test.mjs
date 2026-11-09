@@ -52,7 +52,20 @@ test('indefinite bypass survives restart but never changes the actual sensor sta
 
 test('network, bridge, retirement, inventory and availability faults show trouble without intrusion',()=>{const f=fixture();f.normal();f.arm();for(const mutate of [()=>{const n=f.s.network('net');n.connected=false;f.s.saveNetwork(n);},()=>{const n=f.s.network('net');n.connected=true;n.bridgeState='offline';f.s.saveNetwork(n);},()=>{const n=f.s.network('net');n.bridgeState='online';f.s.saveNetwork(n);const d=f.s.device('door');d.retiredAt=f.now();f.s.saveDevice(d);},()=>{const d=f.s.device('door');d.retiredAt=null;d.inventoryPresent=false;f.s.saveDevice(d);},()=>{const d=f.s.device('door');d.inventoryPresent=true;d.availability='offline';f.s.saveDevice(d);}]){mutate();f.e.tick();f.report('door',{contact:false});assert.equal(f.e.state().zones[0].status,'trouble');assert.equal(f.e.activeIncidents().length,0);}f.close();});
 
-test('partial telemetry does not invent sensor values or refresh the detector-property freshness',()=>{const f=fixture();f.normal();f.arm();f.advance(1501*60000);f.report('door',{battery:80});assert.equal(f.e.state().zones[0].known,false);assert.equal(f.e.activeIncidents().length,0);assert.equal(f.e.state().zones[0].observedValue,null);f.close();});
+test('the default detector reading expires after seven days even if other telemetry arrives',()=>{
+  const f=fixture();
+  f.normal();
+  f.arm();
+  f.advance(7*24*60*60000);
+  assert.equal(f.e.zoneView(f.door).known,true);
+  f.advance(1);
+  f.report('door',{battery:80});
+  const reading=f.e.zoneView(f.door);
+  assert.equal(reading.known,false);
+  assert.equal(reading.observedValue,null);
+  assert.equal(f.e.activeIncidents().length,0);
+  f.close();
+});
 
 test('explicit invalid or mismatched detector values become unknown rather than a healthy false reading',()=>{const f=fixture();for(const value of [null,'unknown',{},[]]){f.normal();f.report('door',{contact:value});const zone=f.e.state().zones.find(zone=>zone.id===f.door.id);assert.equal(zone.known,false);assert.equal(zone.status,'unknown');assert.equal(zone.active,null);assert.throws(()=>f.arm(),/not ready/);}f.close();});
 
