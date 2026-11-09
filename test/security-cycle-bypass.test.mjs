@@ -26,6 +26,99 @@ function fixture(file=':memory:'){
   return {get s(){return s;},get health(){return health;},get accounts(){return accounts;},get security(){return security;},get keypad(){return keypad;},get kiosk(){return kiosk;},admin,operator,a,b,zones,report,prepare,confirm,enable,advance:ms=>now+=ms,close:()=>s.close(),reopen:()=>{s.close();s=new Store(file);health=new Engine(s,{clock:()=>now});accounts=new Accounts(s,{clock:()=>now});security=new SecurityEngine(s,{clock:()=>now,timezone:'UTC'});keypad=new Keypad(s,security,accounts,{clock:()=>now});kiosk=new Kiosk(keypad,{recognizesOrigin:()=>true,clock:()=>now});}};
 }
 const rows=f=>({areas:f.s.all('SELECT * FROM security_areas ORDER BY id'),zones:f.s.all('SELECT * FROM security_zones ORDER BY id'),events:f.s.all('SELECT * FROM security_events ORDER BY id'),incidents:f.s.all('SELECT * FROM security_incidents ORDER BY id')});
+const prepareForce=(f,areaIds=[f.a.id])=>f.keypad.command(f.admin,{action:'prepare_force_arm_away',areaIds});
+const confirmForce=(f,prepared,areaIds=[f.a.id])=>f.keypad.command(f.admin,{action:'force_arm_away',areaIds,bypass:{token:prepared.preview.token}});
+
+test('Force Arm previews known open zones and applies only per-area cycle bypasses with a fixed audit reason',()=>{
+  const f=fixture();try{
+    f.report('inside-a',true);
+    assert.equal(f.keypad.state(f.admin).canForceArm,true);
+    assert.throws(()=>f.keypad.command(f.admin,{action:'arm_away',areaIds:[f.a.id]}),/not ready/);
+    const before=rows(f),prepared=prepareForce(f,[f.a.id,f.b.id]);
+    assert.equal(prepared.action,'prepare_force_arm_away');assert.deepEqual(rows(f),before);
+    assert.deepEqual(prepared.preview.areas.find(area=>area.id===f.a.id).blockingZones,[{id:f.zones[1].id,name:'Zone inside-a',status:'active',trouble:null}]);
+    assert.deepEqual(prepared.preview.areas.find(area=>area.id===f.b.id).blockingZones,[]);
+    const result=confirmForce(f,prepared,[f.a.id,f.b.id]);assert.equal(result.action,'force_arm_away');
+    assert.deepEqual(f.security.area(f.a.id).cycleBypass.zoneIds,[f.zones[1].id]);assert.equal(f.security.area(f.b.id).mode,'away');
+    assert.equal(Object.hasOwn(f.security.area(f.b.id),'cycleBypass'),false);assert.deepEqual(rows(f).zones,before.zones);
+    const audit=f.security.state().events.find(event=>event.type==='cycle_bypass_armed');
+    assert.equal(audit.actor,f.admin.username);assert.match(audit.message,/Reason: Force Arm: bypass known open zones$/);
+    f.security.command(f.a.id,'disarm',{},'Fixture');assert.equal(Object.hasOwn(f.security.area(f.a.id),'cycleBypass'),false);
+  }finally{f.close();}
+});
+
+test('Force Arm rejects mixed open and trouble blockers including an active status carrying trouble',()=>{
+  for(const condition of ['offline','unknown','active-with-trouble']){
+    const f=fixture();try{
+      f.report('shared',true);
+      if(condition==='offline')f.s.saveDevice({...f.s.device('inside-a'),availability:'offline'});
+      if(condition==='unknown')f.security.readings.delete('inside-a');
+      if(condition==='active-with-trouble'){
+        f.report('inside-a',true);const view=f.security.zoneView.bind(f.security);
+        f.security.zoneView=(zone,...args)=>{const value=view(zone,...args);return zone.id===f.zones[1].id?{...value,trouble:'Synthetic active detector trouble'}:value;};
+      }
+      const before=rows(f);assert.throws(()=>prepareForce(f),/only bypasses known open zones/);
+      assert.deepEqual(rows(f),before);assert.equal(f.keypad.armPreviews.size,0);
+      const manual=f.prepare();assert.equal(manual.preview.areas[0].blockingZones.length,2);
+      assert.equal(f.confirm(manual).action,'arm_away');assert.equal(f.security.area(f.a.id).cycleBypass.zoneIds.length,2);
+    }finally{f.close();}
+  }
+});
+
+test('Force Arm requires at least one open blocker and one protected zone in each selected area',()=>{
+  const f=fixture();try{
+    assert.throws(()=>prepareForce(f,[f.a.id,f.b.id]),/use Arm away/);
+    for(const id of ['shared','inside-a','extra-a'])f.report(id,true);
+    const before=rows(f);assert.throws(()=>prepareForce(f,[f.a.id,f.b.id]),/must remain protected/);
+    assert.deepEqual(rows(f),before);
+  }finally{f.close();}
+});
+
+test('Force Arm requires its own preview token and rejects a caller-supplied audit reason',()=>{
+  const f=fixture();try{
+    f.report('shared',true);const before=rows(f);
+    assert.throws(()=>f.keypad.command(f.admin,{action:'force_arm_away',areaIds:[f.a.id]}),/Review the open zones/);
+    const manual=f.prepare();assert.throws(()=>confirmForce(f,manual),/expired or changed/);
+    assert.equal(f.keypad.armPreviews.has(manual.preview.token),false);
+    const forced=prepareForce(f);assert.throws(()=>f.confirm(forced),/expired or changed/);
+    assert.equal(f.keypad.armPreviews.has(forced.preview.token),false);
+    const replacement=prepareForce(f);
+    assert.throws(()=>f.keypad.command(f.admin,{action:'force_arm_away',areaIds:[f.a.id],bypass:{token:replacement.preview.token,reason:'Override'}}),/Unknown keypad field/);
+    assert.deepEqual(rows(f),before);
+  }finally{f.close();}
+});
+
+test('Force Arm rechecks trouble at confirmation and again when applying the cycle bypass',()=>{
+  const f=fixture();try{
+    f.report('shared',true);let prepared=prepareForce(f);
+    f.security.readings.delete('shared');const before=rows(f);
+    assert.throws(()=>confirmForce(f,prepared),/only bypasses known open zones/);
+    assert.deepEqual(rows(f),before);assert.equal(f.keypad.armPreviews.has(prepared.preview.token),false);
+    f.report('shared',true);prepared=prepareForce(f);
+    const arm=f.security.armWithCycleBypass.bind(f.security);
+    f.security.armWithCycleBypass=(...args)=>{f.s.saveDevice({...f.s.device('shared'),availability:'offline'});return arm(...args);};
+    assert.throws(()=>confirmForce(f,prepared),/only bypasses known open zones/);
+    assert.deepEqual(rows(f),before);assert.equal(f.s.device('shared').availability,'online');
+    assert.equal(f.keypad.armPreviews.has(prepared.preview.token),false);
+  }finally{f.close();}
+});
+
+test('Force Arm keeps signed-in control grants and the kiosk opt-in and selected-area scope',()=>{
+  const f=fixture();try{
+    f.report('shared',true);const viewer=f.accounts.create({username:'force-arm-reader',password,permissions:['viewSecurity']},'Fixture');
+    assert.equal(f.keypad.state(viewer).canForceArm,false);
+    assert.throws(()=>f.keypad.command(viewer,{action:'prepare_force_arm_away',areaIds:[f.a.id]}),error=>error.statusCode===403);
+    f.enable({allowBypassArming:false});assert.equal(f.kiosk.state().canForceArm,false);
+    assert.throws(()=>f.kiosk.command({action:'prepare_force_arm_away',all:true}),error=>error.statusCode===403);
+    f.enable({allAreas:false,areaIds:[f.a.id]});assert.equal(f.kiosk.state().canForceArm,true);
+    assert.throws(()=>f.kiosk.command({action:'prepare_force_arm_away',areaIds:[f.a.id,f.b.id]}),error=>error.statusCode===403);
+    const prepared=f.kiosk.command({action:'prepare_force_arm_away',all:true});assert.equal(prepared.action,'prepare_force_arm_away');
+    const result=f.kiosk.command({action:'force_arm_away',all:true,bypass:{token:prepared.preview.token}});
+    assert.equal(result.action,'force_arm_away');assert.deepEqual(result.areaIds,[f.a.id]);assert.equal(f.security.area(f.b.id).mode,'disarmed');
+    assert.equal(result.areas[0].cycleBypassCount,1);assert.equal(Object.hasOwn(result.areas[0],'cycleBypass'),false);
+    assert.equal(f.security.state().events.find(event=>event.type==='cycle_bypass_armed').actor,'Local kiosk');
+  }finally{f.close();}
+});
 
 test('bypass preview is opaque, read-only, caller-bound and lists exact blockers with remaining protection',()=>{
   const f=fixture();try{f.report('shared',true);const before=rows(f),changes=f.s.one('SELECT total_changes() n').n,schema=f.s.all('SELECT * FROM sqlite_master ORDER BY name'),users=f.s.all('SELECT * FROM users');f.s.db.exec('PRAGMA query_only=ON');const result=f.prepare();assert.equal(result.action,'prepare_arm_away');assert.match(result.preview.token,/^[a-f0-9]{64}$/);assert.equal(result.preview.expiresAt,f.keypad.now()+120000);assert.deepEqual(result.preview.areas,[{id:f.a.id,name:'House',blockingZones:[{id:f.zones[0].id,name:'Zone shared',status:'active',trouble:null}],protectedZoneCount:2}]);for(const secret of [f.admin.id,f.admin.username,'cycle-network','deviceId','authVersion','cycleBypass','password'])assert.equal(JSON.stringify(result).includes(secret),false,secret);assert.deepEqual(rows(f),before);assert.deepEqual(f.s.all('SELECT * FROM sqlite_master ORDER BY name'),schema);assert.deepEqual(f.s.all('SELECT * FROM users'),users);assert.equal(f.s.one('SELECT total_changes() n').n,changes);}finally{f.close();}

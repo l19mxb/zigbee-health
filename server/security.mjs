@@ -185,8 +185,15 @@ export class SecurityEngine {
     const cycleBypasses=this.zones().filter(zone=>this.zoneInArea(zone,area.id)&&this.isCycleBypassed(zone,area)).map(({id,name})=>({id,name}));
     return {...area,...readiness,readyAway:away.ready,readyHome:home.ready,status,cycleBypasses,cycleBypassCount:cycleBypasses.length,countdownSec:area.entryAt?Math.max(0,Math.ceil((area.entryAt-this.now())/1000)):area.exitAt?Math.max(0,Math.ceil((area.exitAt-this.now())/1000)):0};
   }
-  armWithCycleBypass(areaId,zoneIds,reason,actor){
+  requireOpenBlockers(area,ready){
+    // The active status requires a known detector reading. A trouble flag must
+    // still disqualify the zone if another status source marks it active.
+    requireValue(ready.blockingZones.every(zone=>zone.status==='active'&&zone.trouble===null),
+      'Force Arm only bypasses known open zones. Resolve zone trouble in '+area.name+' first.');
+  }
+  armWithCycleBypass(areaId,zoneIds,reason,actor,{openOnly=false}={}){
     const area=this.requireArea(areaId),ready=this.readiness(area,'away');
+    if(openOnly)this.requireOpenBlockers(area,ready);
     requireValue(Array.isArray(zoneIds)&&zoneIds.length===new Set(zoneIds).size&&zoneIds.every(id=>typeof id==='string'),'Invalid cycle bypass selection');
     const blockers=ready.blockingZones.map(zone=>zone.id);requireValue(zoneIds.length===blockers.length&&zoneIds.every(id=>blockers.includes(id)),'The bypass list changed; review it again');
     return this._arm(area,'away',text(reason,'Bypass reason',300),actorName(actor),zoneIds);

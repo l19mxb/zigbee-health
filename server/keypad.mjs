@@ -2,6 +2,9 @@ import crypto from 'node:crypto';
 import {hasPermission} from './accounts.mjs';
 
 const OPTIONS={N:32768,r:8,p:1,maxmem:64*1024*1024};
+const PREPARE_ACTIONS=new Map([['prepare_arm_away','arm_away'],['prepare_force_arm_away','force_arm_away']]);
+const COMMAND_ACTIONS=new Set(['arm_away','force_arm_away','disarm',...PREPARE_ACTIONS.keys()]);
+const FORCE_ARM_REASON='Force Arm: bypass known open zones';
 const allowed=(condition,message,statusCode=400)=>{if(!condition)throw new KeypadError(message,statusCode);};
 const keys=(input,names)=>{allowed(input&&typeof input==='object'&&!Array.isArray(input),'Provide keypad fields');allowed(Object.keys(input).every(name=>names.includes(name)),'Unknown keypad field');return input;};
 
@@ -48,34 +51,42 @@ export class Keypad{
     return {...this.security.areaView(area),zoneIssues,zoneTroubleCount:zoneIssues.filter(zone=>zone.status==='trouble'||zone.status==='unknown').length};
   }
   state(sessionUser){
-    if(this.security.demo&&!this.accounts.active())return {now:this.now(),timezone:this.security.timezone,areas:this.security.areas().map(area=>({...this.displayArea(area),canArmAway:false})),canArm:false,canBypassArm:false,armingRevision:this.armingRevision(this.security.areas().map(area=>area.id),'demo'),readOnly:true,ownPin:{configured:false,areaIds:[],allAreas:false},message:'Sign in with an authenticated account to use the keypad.'};
+    if(this.security.demo&&!this.accounts.active())return {now:this.now(),timezone:this.security.timezone,areas:this.security.areas().map(area=>({...this.displayArea(area),canArmAway:false})),canArm:false,canBypassArm:false,canForceArm:false,armingRevision:this.armingRevision(this.security.areas().map(area=>area.id),'demo'),readOnly:true,ownPin:{configured:false,areaIds:[],allAreas:false},message:'Sign in with an authenticated account to use the keypad.'};
     const user=this.freshUser(sessionUser.id);allowed(hasPermission(user,'viewSecurity'),'Security access is required',403);
     const settings=this.settings(user.id);
-    return {now:this.now(),timezone:this.security.timezone,areas:this.security.areas().map(area=>{const view=this.displayArea(area);return {...view,canArmAway:!!(hasPermission(user,'controlSecurity')&&area.mode==='disarmed'&&!area.targetMode&&view.readyAway)};}),canArm:hasPermission(user,'controlSecurity'),canBypassArm:hasPermission(user,'controlSecurity'),armingRevision:this.armingRevision(this.security.areas().map(area=>area.id),this.userBinding(user)),readOnly:false,ownPin:{configured:settings.pinSet,areaIds:settings.areaIds,allAreas:settings.allAreas}};
+    const canArm=hasPermission(user,'controlSecurity');
+    return {now:this.now(),timezone:this.security.timezone,areas:this.security.areas().map(area=>{const view=this.displayArea(area);return {...view,canArmAway:!!(canArm&&area.mode==='disarmed'&&!area.targetMode&&view.readyAway)};}),canArm,canBypassArm:canArm,canForceArm:canArm,armingRevision:this.armingRevision(this.security.areas().map(area=>area.id),this.userBinding(user)),readOnly:false,ownPin:{configured:settings.pinSet,areaIds:settings.areaIds,allAreas:settings.allAreas}};
   }
   userBinding(user){return 'user:'+user.id+':'+user.authVersion;}
   armingConfig(areaIds){const ids=new Set(areaIds);return {areas:[...areaIds].sort().map(id=>this.security.requireArea(id)),zones:this.security.zones().filter(zone=>zone.areaIds.some(id=>ids.has(id))),schedules:this.security.schedules().filter(schedule=>ids.has(schedule.areaId))};}
   armingRevision(areaIds,binding){return this.mac('arming-revision\0'+this.previewEpoch+'\0'+binding+'\0'+JSON.stringify(this.armingConfig(areaIds)));}
-  bypassPlan(areaIds){
+  bypassPlan(areaIds,action='arm_away'){
     const areas=[...areaIds].sort().map(id=>{
       const area=this.security.requireArea(id),ready=this.security.readiness(area,'away');allowed(area.enabled,'This security area is disabled');allowed(area.mode==='disarmed'&&!area.targetMode,'Disarm '+area.name+' before arming it again');allowed(!ready.activeAlarmCount,'Reset alarm memory before arming this area');allowed(ready.zoneCount>0,'Add an enabled zone before arming this area');
+      if(action==='force_arm_away')this.security.requireOpenBlockers(area,ready);
       const protectedZoneCount=ready.includedCount-ready.blockingZones.length;allowed(protectedZoneCount>0,'At least one included, ready zone must remain protected in '+area.name);
       return {id:area.id,name:area.name,blockingZones:ready.blockingZones.map(({id,name,status,trouble})=>({id,name,status,trouble})),protectedZoneCount};
     });
     const config=this.armingConfig(areaIds),conditions=config.zones.map(zone=>({id:zone.id,areas:zone.areaIds.filter(id=>areaIds.includes(id)).map(id=>{const view=this.security.zoneView(zone,this.security.requireArea(id),'away');return {id,known:view.known,active:view.active,status:view.status,trouble:view.trouble};})}));
-    return {areas,signature:this.mac('arming-plan\0'+JSON.stringify({config,conditions}))};
+    return {areas,signature:this.mac('arming-plan\0'+JSON.stringify({action,config,conditions}))};
   }
-  prepareBypass(areaIds,binding){
-    const plan=this.bypassPlan(areaIds);allowed(plan.areas.some(area=>area.blockingZones.length),'These areas are ready; use Arm away');
+  prepareBypass(areaIds,binding,prepareAction='prepare_arm_away'){
+    const action=PREPARE_ACTIONS.get(prepareAction),plan=this.bypassPlan(areaIds,action);allowed(plan.areas.some(area=>area.blockingZones.length),'These areas are ready; use Arm away');
     for(const [token,value] of this.armPreviews)if(value.expiresAt<=this.now()||value.binding===binding)this.armPreviews.delete(token);allowed(this.armPreviews.size<256,'Too many arming previews. Try again later.',429);
-    const token=crypto.randomBytes(32).toString('hex'),expiresAt=this.now()+120000;this.armPreviews.set(token,{binding,areaIds:[...areaIds].sort(),signature:plan.signature,expiresAt});return {ok:true,action:'prepare_arm_away',preview:{token,expiresAt,areas:plan.areas}};
+    const token=crypto.randomBytes(32).toString('hex'),expiresAt=this.now()+120000;this.armPreviews.set(token,{action,binding,areaIds:[...areaIds].sort(),signature:plan.signature,expiresAt});return {ok:true,action:prepareAction,preview:{token,expiresAt,areas:plan.areas}};
   }
-  confirmBypass(areaIds,bypass,binding,actor,checkCaller){
-    const body=keys(bypass,['token','reason']);allowed(typeof body.token==='string'&&/^[a-f0-9]{64}$/.test(body.token),'Review the bypass list again');
+  confirmBypass(areaIds,bypass,binding,actor,checkCaller,action='arm_away'){
+    const openOnly=action==='force_arm_away';
+    allowed(!openOnly||bypass!==undefined,'Review the open zones before Force Arm');
+    const body=keys(bypass,openOnly?['token']:['token','reason']);allowed(typeof body.token==='string'&&/^[a-f0-9]{64}$/.test(body.token),'Review the bypass list again');
     const preview=this.armPreviews.get(body.token);allowed(preview&&preview.binding===binding,'Arming preview expired or changed; review the bypass list again');this.armPreviews.delete(body.token);
-    allowed(typeof body.reason==='string'&&body.reason.trim().length>0&&body.reason.trim().length<=300&&!/[\u0000-\u001f\u007f]/.test(body.reason),'Enter a bypass reason (1–300 characters)');
-    allowed(preview.expiresAt>this.now()&&JSON.stringify(preview.areaIds)===JSON.stringify([...areaIds].sort()),'Arming preview expired or changed; review the bypass list again');
-    const results=this.s.transaction(()=>{checkCaller();const plan=this.bypassPlan(areaIds);allowed(plan.signature===preview.signature,'Conditions changed; review the bypass list again');return plan.areas.map(area=>this.security.armWithCycleBypass(area.id,area.blockingZones.map(zone=>zone.id),body.reason.trim(),actor));});return {ok:true,action:'arm_away',areaIds:results.map(area=>area.id),areas:results};
+    allowed(preview.action===action&&preview.expiresAt>this.now()&&JSON.stringify(preview.areaIds)===JSON.stringify([...areaIds].sort()),'Arming preview expired or changed; review the bypass list again');
+    if(!openOnly)allowed(typeof body.reason==='string'&&body.reason.trim().length>0&&body.reason.trim().length<=300&&!/[\u0000-\u001f\u007f]/.test(body.reason),'Enter a bypass reason (1–300 characters)');
+    const reason=openOnly?FORCE_ARM_REASON:body.reason.trim();
+    const results=this.s.transaction(()=>{
+      checkCaller();const plan=this.bypassPlan(areaIds,action);allowed(plan.signature===preview.signature,'Conditions changed; review the bypass list again');
+      return plan.areas.map(area=>this.security.armWithCycleBypass(area.id,area.blockingZones.map(zone=>zone.id),reason,actor,{openOnly}));
+    });return {ok:true,action,areaIds:results.map(area=>area.id),areas:results};
   }
   checkThrottle(scope){
     const row=this.s.one('SELECT blocked_until,last_at FROM security_keypad_throttle WHERE scope=?',scope),now=this.now();
@@ -126,7 +137,7 @@ export class Keypad{
   }
   kioskCommand(input,scope,{allowBypassArming=false,binding='',checkBypass=()=>{}}={}){
     const body=keys(input,['action','areaIds','all','pin','bypass']),scopeIds=this.validateAreas(scope),scopeSet=new Set(scopeIds);
-    allowed(['arm_away','prepare_arm_away','disarm'].includes(body.action),'Choose Arm Away or Disarm');allowed(body.all===undefined||typeof body.all==='boolean','All areas must be on or off');allowed(!(body.all===true&&body.areaIds!==undefined),'Choose selected areas or all areas');
+    allowed(COMMAND_ACTIONS.has(body.action),'Choose an arming or disarm command');allowed(body.all===undefined||typeof body.all==='boolean','All areas must be on or off');allowed(!(body.all===true&&body.areaIds!==undefined),'Choose selected areas or all areas');
     const explicit=body.all===true?null:this.validateAreas(body.areaIds);if(explicit)allowed(explicit.length>0,'Select at least one area');let actor=null,areaIds=explicit;
     if(body.action!=='disarm'){
       allowed(body.pin===undefined,'Arming does not require a PIN');if(body.all===true)areaIds=scopeIds;allowed(areaIds.every(id=>scopeSet.has(id)),'Choose only areas available on this kiosk',403);
@@ -136,7 +147,17 @@ export class Keypad{
       const assigned=this.areaIds(actor);if(body.all===true)areaIds=assigned.filter(id=>scopeSet.has(id));if(!areaIds?.length||areaIds.some(id=>!scopeSet.has(id)||!assigned.includes(id)))return this.rejected({username:'Local kiosk'});
     }
     allowed(areaIds?.length>0,'No areas are available');
-    if(body.action==='prepare_arm_away'||body.bypass!==undefined){allowed(allowBypassArming&&typeof binding==='string'&&binding.startsWith('kiosk:'),'Bypass arming is not enabled for this kiosk',403);if(body.action==='prepare_arm_away'){allowed(body.bypass===undefined,'Request a new bypass preview');checkBypass(areaIds);return this.prepareBypass(areaIds,binding);}return this.confirmBypass(areaIds,body.bypass,binding,'Local kiosk',()=>{allowed(allowBypassArming&&areaIds.every(id=>scopeSet.has(id)),'Kiosk permissions changed',403);checkBypass(areaIds);});}
+    const preparing=PREPARE_ACTIONS.has(body.action);
+    if(preparing||body.action==='force_arm_away'||body.bypass!==undefined){
+      allowed(allowBypassArming&&typeof binding==='string'&&binding.startsWith('kiosk:'),'Bypass arming is not enabled for this kiosk',403);
+      if(preparing){
+        allowed(body.bypass===undefined,'Request a new bypass preview');checkBypass(areaIds);
+        return this.prepareBypass(areaIds,binding,body.action);
+      }
+      return this.confirmBypass(areaIds,body.bypass,binding,'Local kiosk',()=>{
+        allowed(allowBypassArming&&areaIds.every(id=>scopeSet.has(id)),'Kiosk permissions changed',403);checkBypass(areaIds);
+      },body.action);
+    }
     const areas=areaIds.map(id=>this.security.requireArea(id));
     if(body.action==='arm_away')for(const area of areas){const ready=this.security.readiness(area,'away');allowed(area.mode==='disarmed'&&!area.targetMode,'Disarm '+area.name+' before arming it again');allowed(ready.ready,'Area not ready: '+area.name);}
     const results=this.s.transaction(()=>{
@@ -145,7 +166,7 @@ export class Keypad{
     });return {ok:true,action:body.action,areaIds,areas:results};
   }
   command(sessionUser,input){
-    const body=keys(input,['action','areaIds','all','pin','bypass']),session=this.freshUser(sessionUser.id);allowed(hasPermission(session,'viewSecurity'),'Security access is required',403);allowed(['arm_away','prepare_arm_away','disarm'].includes(body.action),'Choose Arm Away or Disarm');
+    const body=keys(input,['action','areaIds','all','pin','bypass']),session=this.freshUser(sessionUser.id);allowed(hasPermission(session,'viewSecurity'),'Security access is required',403);allowed(COMMAND_ACTIONS.has(body.action),'Choose an arming or disarm command');
     allowed(body.all===undefined||typeof body.all==='boolean','All areas must be on or off');allowed(!(body.all===true&&body.areaIds!==undefined),'Choose selected areas or all areas');
     const explicit=body.all===true?null:this.validateAreas(body.areaIds);if(explicit)allowed(explicit.length>0,'Select at least one area');
     let actor=session,areaIds=explicit;
@@ -159,8 +180,15 @@ export class Keypad{
       if(!areaIds?.length||areaIds.some(id=>!authorized.includes(id)))return this.rejected(session);
     }
     allowed(areaIds?.length>0,'No areas are available');
-    if(body.action==='prepare_arm_away'){allowed(body.bypass===undefined,'Request a new bypass preview');return this.prepareBypass(areaIds,this.userBinding(session));}
-    if(body.bypass!==undefined)return this.confirmBypass(areaIds,body.bypass,this.userBinding(session),session.username,()=>{const current=this.freshUser(session.id);allowed(hasPermission(current,'controlSecurity')&&this.userBinding(current)===this.userBinding(session),'Your session permissions changed',403);});
+    if(PREPARE_ACTIONS.has(body.action)){
+      allowed(body.bypass===undefined,'Request a new bypass preview');
+      return this.prepareBypass(areaIds,this.userBinding(session),body.action);
+    }
+    if(body.action==='force_arm_away'||body.bypass!==undefined){
+      return this.confirmBypass(areaIds,body.bypass,this.userBinding(session),session.username,()=>{
+        const current=this.freshUser(session.id);allowed(hasPermission(current,'controlSecurity')&&this.userBinding(current)===this.userBinding(session),'Your session permissions changed',403);
+      },body.action);
+    }
     const areas=areaIds.map(id=>this.security.requireArea(id));
     if(body.action==='arm_away')for(const area of areas){const ready=this.security.readiness(area,'away');allowed(area.mode==='disarmed'&&!area.targetMode,'Disarm '+area.name+' before arming it again');allowed(ready.ready,'Area not ready: '+area.name);}
     const results=this.s.transaction(()=>{

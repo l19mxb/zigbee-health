@@ -59,7 +59,7 @@ test('command gate requires matching Origin, JSON and same-origin Fetch-Site bef
 });
 
 test('kiosk state allowlists scoped display data and cannot expose users, PIN settings, brokers, history or credentials',()=>{
-  const f=fixture();try{f.pin();f.enable();const changes=f.s.one('SELECT total_changes() n').n;f.s.db.exec('PRAGMA query_only = ON');const state=f.kiosk.state();assert.deepEqual(Object.keys(state).sort(),['areas','armingRevision','canArm','canBypassArm','kiosk','now','readOnly','timezone']);assert.equal(state.areas.length,1);assert.equal(state.areas[0].id,f.areas[0].id);assert.equal(state.canArm,true);assert.equal(state.readOnly,false);assert.equal(state.canBypassArm,false);assert.equal(state.areas[0].canArmAway,true);
+  const f=fixture();try{f.pin();f.enable();const changes=f.s.one('SELECT total_changes() n').n;f.s.db.exec('PRAGMA query_only = ON');const state=f.kiosk.state();assert.deepEqual(Object.keys(state).sort(),['areas','armingRevision','canArm','canBypassArm','canForceArm','kiosk','now','readOnly','timezone']);assert.equal(state.areas.length,1);assert.equal(state.areas[0].id,f.areas[0].id);assert.equal(state.canArm,true);assert.equal(state.readOnly,false);assert.equal(state.canBypassArm,false);assert.equal(state.canForceArm,false);assert.equal(state.areas[0].canArmAway,true);
     for(const secret of [f.admin.id,f.operator.id,f.operator.username,'0471','fixture-broker-secret','10.44.0.10','kiosk-network','kiosk-device-0',f.areas[1].id,f.zones[1].id,'ownPin','cycleId','armedAt','pendingZoneId','createdAt','authVersion','schedules','actions','events','networks','subscriptions'])assert.equal(JSON.stringify(state).includes(secret),false,secret);assert.equal(f.s.one('SELECT total_changes() n').n,changes);
   }finally{f.close();}
 });

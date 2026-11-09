@@ -28,6 +28,8 @@ to a broker.
   entry/exit delays, bypasses, latched alarm memory and weekly schedules.
 - Responsive tablet keypad with area LEDs, not-ready zone browsing, code-free
   Away arming and personal four-digit PIN disarming.
+- **Force Arm** on the keypad reviews and bypasses currently open zones for
+  the selected areas' Away arming cycle. Unavailable zones still block it.
 - Explicit review and confirmation to bypass blocking zones for one area's
   current arm cycle, with assigned-area PIN access for disarming.
 - Optional local kiosk page without a dashboard login, restricted to a direct

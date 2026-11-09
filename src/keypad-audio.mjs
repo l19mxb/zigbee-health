@@ -77,7 +77,7 @@ export function createKeypadAudio({enabled=true,visible=true,now=()=>Date.now(),
     if(quiet)silence();else if(cue)queue(cue);return quiet?null:cue;
   }
   function accepted(result){
-    if(destroyed||!result?.ok||!['arm_away','arm_home','disarm'].includes(result.action))return null;
+    if(destroyed||!result?.ok||!['arm_away','arm_home','force_arm_away','disarm'].includes(result.action))return null;
     const timestamp=now(),areas=areaList(result.areas),quiet=baseline||!shown||lastAt===null||timestamp-lastAt>maximumObservationGap||areas.some(area=>!states.has(area.id));let cue=null;
     for(const area of areas){const next=record(area);if(!quiet&&result.action!=='disarm')cue=stronger(cue,cueFor(states.get(area.id),next));states.set(area.id,next);}
     lastAt=timestamp;if(quiet){baseline=true;silence();return null;}if(cue)queue(cue);return cue;

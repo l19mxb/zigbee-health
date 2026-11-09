@@ -223,6 +223,12 @@ does not need a PIN. Existing readiness checks apply. The keypad shows blocking
 zones and never silently bypasses them. A multi-area command either succeeds
 for the complete selection or leaves it unchanged.
 
+**Force Arm** reviews the currently open zones in the selected areas and arms
+Away after confirmation. Offline, unknown or faulty zones that would otherwise
+block arming still block Force Arm. Each selected area must keep at least one
+enabled, ready zone under protection. The Security history records the action
+and the bypassed zones.
+
 If selected areas have open, unknown or unavailable zones, **Bypass and arm**
 opens a review of the exact zones to be left unprotected in each area. Enter a
 reason and confirm the warning before arming. Each area must retain at least
@@ -237,9 +243,9 @@ during the exit delay are not automatically bypassed. A detector shared with
 another area continues to protect that other area. The green Ready LED still
 flashes for the underlying open, trouble or alarm condition.
 
-An anonymous local kiosk offers this flow only when an administrator separately
-enables **Allow bypass and arm** in its settings. Scheduled arming never chooses
-bypasses automatically.
+An anonymous local kiosk offers **Force Arm** and **Bypass and arm** only when an
+administrator enables **Allow bypass and arm** in its settings. Scheduled
+arming never chooses bypasses automatically.
 
 Set a personal four-digit PIN in **My account & app → Keypad PIN**, confirming
 your current dashboard password. An administrator can also use **Users →
