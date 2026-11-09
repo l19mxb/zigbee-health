@@ -100,9 +100,13 @@ test('a legacy browser changing zone fields preserves shared memberships until i
 
 test('removing an area detaches a shared zone without deleting its other membership or detector settings',()=>{
   const f=fixture();try{
-    const zone=f.add({freshnessMin:45,type:'entry'});f.e.removeArea(f.a.id);const remaining=f.e.zone(zone.id);
+    const zone=f.add({type:'entry'});
+    f.s.run('UPDATE security_zones SET json=? WHERE id=?',JSON.stringify({...f.e.zone(zone.id),freshnessMin:45}),zone.id);
+    f.e.removeArea(f.a.id);const remaining=f.e.zone(zone.id);
     assert.equal(remaining.id,zone.id);assert.equal(remaining.deviceId,zone.deviceId);assert.equal(remaining.freshnessMin,45);assert.equal(remaining.type,'entry');assert.equal(remaining.areaId,f.b.id);assert.deepEqual(remaining.areaIds,[f.b.id]);
-    assert.equal(f.e.state().areas[0].zoneCount,1);f.e.removeArea(f.b.id);assert.equal(f.e.zone(zone.id),null);assert.deepEqual(f.s.all('SELECT * FROM security_zone_areas'),[]);
+    assert.equal(f.e.state().areas[0].zoneCount,1);assert.equal(f.s.get('securityReadingTimeoutMin'),null);
+    f.e.removeArea(f.b.id);assert.equal(f.e.zone(zone.id),null);assert.deepEqual(f.s.all('SELECT * FROM security_zone_areas'),[]);
+    assert.equal(f.e.readingTimeoutMin(),45);assert.equal(f.s.get('securityReadingTimeoutMin'),45);
   }finally{f.close();}
 });
 

@@ -149,8 +149,10 @@ test('disabled, empty, already armed, alarm-memory and fully blocked areas canno
 });
 
 test('fresh blocker, configuration, schedule and cycle changes invalidate a one-shot preview without writes',()=>{
-  for(const condition of ['extra-fault','restored','unknown','zone-config','schedule','cycle','manual-bypass']){const f=fixture();try{
-    f.report('shared',true);const preview=f.prepare();if(condition==='extra-fault')f.report('inside-a',true);if(condition==='restored')f.report('shared',false);if(condition==='unknown')f.security.readings.delete('shared');if(condition==='zone-config')f.security.saveZone({id:f.zones[0].id,name:'Changed zone'},'Fixture');if(condition==='schedule')f.security.saveSchedule({name:'Changed schedule',areaId:f.a.id,days:[0],time:'12:00',mode:'away',enabled:false},'Fixture');if(condition==='cycle'){f.report('shared',false);f.security.command(f.a.id,'arm_away',{},'Fixture');f.security.command(f.a.id,'disarm',{},'Fixture');f.report('shared',true);}if(condition==='manual-bypass')f.security.bypassZone(f.zones[0].id,{durationMin:null,reason:'Synthetic maintenance'},'Fixture');const before=rows(f);assert.throws(()=>f.confirm(preview),/changed|review/i);assert.deepEqual(rows(f),before);assert.throws(()=>f.confirm(preview),/expired or changed/);
+  for(const condition of ['extra-fault','restored','unknown','zone-config','reading-timeout','schedule','cycle','manual-bypass']){const f=fixture();try{
+    f.report('shared',true);const preview=f.prepare();
+    if(condition==='reading-timeout')f.security.saveSettings({readingTimeoutMin:60,expectedReadingTimeoutMin:10080},'Fixture');
+    if(condition==='extra-fault')f.report('inside-a',true);if(condition==='restored')f.report('shared',false);if(condition==='unknown')f.security.readings.delete('shared');if(condition==='zone-config')f.security.saveZone({id:f.zones[0].id,name:'Changed zone'},'Fixture');if(condition==='schedule')f.security.saveSchedule({name:'Changed schedule',areaId:f.a.id,days:[0],time:'12:00',mode:'away',enabled:false},'Fixture');if(condition==='cycle'){f.report('shared',false);f.security.command(f.a.id,'arm_away',{},'Fixture');f.security.command(f.a.id,'disarm',{},'Fixture');f.report('shared',true);}if(condition==='manual-bypass')f.security.bypassZone(f.zones[0].id,{durationMin:null,reason:'Synthetic maintenance'},'Fixture');const before=rows(f);assert.throws(()=>f.confirm(preview),/changed|review/i);assert.deepEqual(rows(f),before);assert.throws(()=>f.confirm(preview),/expired or changed/);
   }finally{f.close();}}
 });
 

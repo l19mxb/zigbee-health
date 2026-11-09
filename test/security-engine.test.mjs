@@ -67,6 +67,59 @@ test('the default detector reading expires after seven days even if other teleme
   f.close();
 });
 
+test('legacy zone timeouts yield one conservative value without startup writes and remain stable on removal',()=>{
+  const f=fixture();
+  try{
+    const writeLegacy=(zone,changes)=>f.s.run('UPDATE security_zones SET json=? WHERE id=?',JSON.stringify({...f.e.zone(zone.id),...changes}),zone.id);
+    writeLegacy(f.door,{freshnessMin:120});
+    writeLegacy(f.motion,{freshnessMin:15,enabled:false});
+    const settings=f.s.all('SELECT * FROM settings ORDER BY key'),zones=f.s.all('SELECT * FROM security_zones ORDER BY id');
+    f.restart();
+    const state=f.e.state();
+    assert.equal(state.readingTimeoutMin,15);
+    assert.ok(state.zones.every(zone=>zone.freshnessMin===15));
+    assert.deepEqual(f.s.all('SELECT * FROM settings ORDER BY key'),settings);
+    assert.deepEqual(f.s.all('SELECT * FROM security_zones ORDER BY id'),zones);
+    const renamed=f.e.saveZone({id:f.door.id,name:'Renamed contact',freshnessMin:60},'tester');
+    assert.equal(renamed.freshnessMin,15);
+    assert.equal(f.e.zone(f.door.id).freshnessMin,120);
+    assert.throws(()=>f.e.saveZone({id:f.door.id,freshnessMin:0},'tester'),/zone reporting timeout/);
+    f.normal();f.advance(15*60000+1);
+    assert.equal(f.e.zoneState(f.e.zone(f.door.id)).known,false);
+    assert.throws(()=>f.arm(),/not ready/);
+    f.e.removeZone(f.motion.id,'tester');
+    assert.equal(f.s.get('securityReadingTimeoutMin'),15);
+    f.restart();
+    assert.equal(f.e.readingTimeoutMin(),15);
+  }finally{f.close();}
+});
+
+test('global timeout changes are blocked throughout arming and preserve alarm memory after disarm',()=>{
+  const f=fixture({entryDelaySec:10,exitDelaySec:5});
+  try{
+    const save=()=>f.e.saveSettings({readingTimeoutMin:120,expectedReadingTimeoutMin:10080},'tester');
+    const rejected=()=>{
+      assert.equal(f.e.state().canChangeReadingTimeout,false);
+      assert.throws(save,/Disarm every area/);
+      assert.equal(f.s.get('securityReadingTimeoutMin'),null);
+      assert.ok(!f.e.state().events.some(event=>event.type==='reading_timeout_updated'));
+    };
+    f.normal();f.arm();rejected();
+    f.advance(5000);f.e.tick();rejected();
+    f.report('door',{contact:false});rejected();
+    f.report('motion',{occupancy:true});rejected();
+    f.e.command(f.area.id,'disarm',{},'tester');
+    const memory=f.e.activeIncidents();
+    assert.equal(memory.length,1);
+    assert.equal(f.e.state().canChangeReadingTimeout,true);
+    assert.deepEqual(save(),{readingTimeoutMin:120});
+    assert.equal(f.e.state().readingTimeoutMin,120);
+    assert.ok(f.e.state().zones.every(zone=>zone.freshnessMin===120));
+    assert.deepEqual(f.e.activeIncidents(),memory);
+    assert.equal(f.e.state().events.find(event=>event.type==='reading_timeout_updated').actor,'tester');
+  }finally{f.close();}
+});
+
 test('explicit invalid or mismatched detector values become unknown rather than a healthy false reading',()=>{const f=fixture();for(const value of [null,'unknown',{},[]]){f.normal();f.report('door',{contact:value});const zone=f.e.state().zones.find(zone=>zone.id===f.door.id);assert.equal(zone.known,false);assert.equal(zone.status,'unknown');assert.equal(zone.active,null);assert.throws(()=>f.arm(),/not ready/);}f.close();});
 
 test('stable armed mode survives restart, retained cached values do nothing, first fresh activation is detected',()=>{const f=fixture();f.normal();f.action();f.arm();f.restart();assert.equal(f.e.state().areas[0].mode,'away');assert.equal(f.e.state().zones[0].known,false);assert.equal(f.e.queuedActions().length,0);f.report('door',{contact:false},{retain:true});assert.equal(f.e.activeIncidents().length,0);f.report('door',{contact:false},{dup:true});assert.equal(f.e.activeIncidents().length,0);f.advance(100);f.report('door',{contact:false});assert.equal(f.e.activeIncidents().length,1);assert.equal(f.e.queuedActions().length,1);f.close();});

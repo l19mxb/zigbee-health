@@ -1,11 +1,11 @@
 import React,{useEffect,useRef,useState} from 'react';
 import {request} from './api.jsx';
-import {Badge,Icon,Pagination,date} from './ui.jsx';
+import {Badge,Field,Icon,Pagination,date} from './ui.jsx';
 import {SortHead,useTable} from './tables.jsx';
 import {SecurityBypassDialog,SecurityCommandDialog,SecurityForm,SecurityRemoveDialog} from './security-forms.jsx';
 import './security.css';
 
-const tabs=[['overview','Overview'],['zones','Zones'],['schedules','Schedules'],['actions','Alert actions']];
+const tabs=[['overview','Overview'],['zones','Zones'],['settings','Settings'],['schedules','Schedules'],['actions','Alert actions']];
 const modeName={disarmed:'Disarmed',home:'Armed Home',away:'Armed Away'};
 const deliveryName={mqtt:'MQTT event',email:'Email',push:'Browser push'};
 const days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -21,6 +21,11 @@ const zonesForArea=(zones,areaId)=>zones.filter(zone=>membershipIds(zone).includ
 const zoneEditable=(zone,areas)=>membershipIds(zone).length>0&&membershipIds(zone).every(id=>canConfigure(areas.get(id)));
 const areaRemovable=(area,zones,areas,incidents)=>canConfigure(area)&&!area.activeAlarmCount&&zones.filter(zone=>membershipIds(zone).includes(area.id)).every(zone=>zoneEditable(zone,areas)&&!incidents.some(incident=>incident.zoneId===zone.id&&incident.resetAt==null));
 const plural=(number,noun)=>number+' '+noun+(number===1?'':noun==='bypass'?'es':'s');
+const validReadingTimeout=minutes=>Number.isInteger(minutes)&&minutes>=1&&minutes<=43200;
+function timeoutDuration(minutes){
+  return [[Math.floor(minutes/1440),'day'],[Math.floor(minutes%1440/60),'hour'],[minutes%60,'minute']]
+    .filter(([count])=>count>0).map(([count,unit])=>plural(count,unit)).join(' ');
+}
 function areaStatus(area){return area.status==='alarm'?'Alarm':area.status==='exit_delay'?'Exit delay':area.status==='entry_delay'?'Entry delay':modeName[area.mode]||'Disarmed';}
 function zoneLabel(zone){if(manualBypass(zone))return 'Manual bypass';if(zone.cycleBypassed)return 'Cycle bypass';if(zone.homeExcluded)return 'Home bypass';if(zone.bypassed||zone.status==='bypassed')return 'Bypassed';if(!zone.enabled)return 'Disabled';if(zone.trouble||zone.status==='trouble')return 'Trouble';if(!zone.known||zone.status==='unknown')return 'Waiting for reading';if(zone.active)return zone.property==='contact'?'Open':'Active';return zone.property==='contact'?'Closed':['occupancy','vibration'].includes(zone.property)?'Clear':'Normal';}
 function zoneTone(zone){return zone.bypassed||zone.status==='bypassed'||!zone.enabled?'neutral':zone.trouble||!zone.known?'warning':zone.active?'critical':'healthy';}
@@ -54,7 +59,8 @@ export default function Security({permissions={},demo=false,onAccount,openIncide
   async function save(route,body){
     if(error)throw Error('Reconnect to security before applying this change.');
     setBusy(true);setMessage('');
-    try{const result=await request(route,body);await refresh();setDialog(null);setMessage(route.includes('command')?'Area command applied.':route.includes('bypass')?'Zone bypass updated.':'Security configuration saved.');return result;}
+    try{const result=await request(route,body);await refresh();setDialog(null);setMessage(route==='security/settings'?'Zone reading timeout saved.':route.includes('command')?'Area command applied.':route.includes('bypass')?'Zone bypass updated.':'Security configuration saved.');return result;}
+    catch(cause){if(route==='security/settings'&&cause.status===409)await refresh();throw cause;}
     finally{setBusy(false);}
   }
   if(!state)return <div className="security-loading" role={error?'alert':'status'}>{loading?'Opening security…':error}{error?<button onClick={refresh}>Try again</button>:null}</div>;
@@ -78,10 +84,61 @@ export default function Security({permissions={},demo=false,onAccount,openIncide
       </div>
       <SecurityAlarmStack state={safeState} areas={currentAreas} control={control&&!busy&&!error} onCommand={openCommand}/>
       <RecentActivity state={safeState} areas={currentAreas}/>
-    </>:tab==='zones'?<Zones state={safeState} manage={manage&&!busy&&!error} control={control&&!busy&&!error} onAdd={()=>openForm('zone')} onEdit={item=>openForm('zone',item)} onRemove={item=>setDialog({type:'remove',kind:'zone',item})} onBypass={(item,clear)=>setDialog({type:'bypass',item,clear})}/>:tab==='schedules'?<Schedules state={safeState} manage={manage&&!busy&&!error} onAdd={()=>openForm('schedule')} onEdit={item=>openForm('schedule',item)} onRemove={item=>setDialog({type:'remove',kind:'schedule',item})}/>:<AlertActions state={safeState} manage={manage&&!busy&&!error} onAdd={()=>openForm('action')} onEdit={item=>openForm('action',item)} onRemove={item=>setDialog({type:'remove',kind:'action',item})}/>}
+    </>:tab==='zones'?<Zones state={safeState} manage={manage&&!busy&&!error} control={control&&!busy&&!error} onAdd={()=>openForm('zone')} onEdit={item=>openForm('zone',item)} onRemove={item=>setDialog({type:'remove',kind:'zone',item})} onBypass={(item,clear)=>setDialog({type:'bypass',item,clear})}/>:tab==='schedules'?<Schedules state={safeState} manage={manage&&!busy&&!error} onAdd={()=>openForm('schedule')} onEdit={item=>openForm('schedule',item)} onRemove={item=>setDialog({type:'remove',kind:'schedule',item})}/>:tab==='actions'?<AlertActions state={safeState} manage={manage&&!busy&&!error} onAdd={()=>openForm('action')} onEdit={item=>openForm('action',item)} onRemove={item=>setDialog({type:'remove',kind:'action',item})}/>:<SecuritySettings timeout={state.readingTimeoutMin} canChange={state.canChangeReadingTimeout===true} manage={manage} busy={busy} disconnected={!!error} onSave={save}/>}
     {demo?<p className="security-demo-note"><Icon name="flask" size={15}/>Simulation only. Security actions do not publish MQTT messages or send email.</p>:null}
     {dialog?.type==='form'?<SecurityForm key={dialog.kind+(dialog.item?.id||'new')} kind={dialog.kind} item={dialog.item} state={safeState} areaId={selected&&canConfigure(selected)?selected.id:areas.find(canConfigure)?.id} onClose={()=>setDialog(null)} onSave={save} onAccount={onAccount}/>:dialog?.type==='command'?<SecurityCommandDialog area={areas.find(area=>area.id===dialog.area.id)||dialog.area} action={dialog.action} zones={zonesForArea(zones,dialog.area.id)} onClose={()=>setDialog(null)} onSave={save}/>:dialog?.type==='bypass'?<SecurityBypassDialog zone={dialog.item} clear={dialog.clear} onClose={()=>setDialog(null)} onSave={save}/>:dialog?.type==='remove'?<SecurityRemoveDialog kind={dialog.kind} item={dialog.item} onClose={()=>setDialog(null)} onSave={save}/>:null}
   </div>;
+}
+
+function SecuritySettings({timeout,canChange,manage,busy,disconnected,onSave}){
+  const [draft,setDraft]=useState(null),[error,setError]=useState('');
+  const available=validReadingTimeout(timeout);
+  const value=draft?.value??(available?String(timeout):'');
+  const minutes=Number(value);
+  const changed=minutes!==timeout;
+  const conflict=draft!==null&&draft.base!==timeout&&changed;
+  const blocked=busy||disconnected||!canChange||!available;
+  const canSave=draft!==null&&!blocked&&!conflict&&changed&&validReadingTimeout(minutes);
+
+  function reset(){
+    setDraft(null);
+    setError('');
+  }
+  async function submit(event){
+    event.preventDefault();
+    if(!canSave)return;
+    setError('');
+    try{
+      await onSave('security/settings',{readingTimeoutMin:minutes,expectedReadingTimeoutMin:draft.base});
+      setDraft(null);
+    }catch(cause){
+      setError(cause.message);
+    }
+  }
+
+  return <section className="security-section" aria-label="Security settings">
+    <PanelHeading title="Security settings"/>
+    <div className="security-settings-content">
+      <h3>Zone reading timeout</h3>
+      <p id="security-timeout-help">This applies to every security zone. When the last report for a zone’s activation property exceeds the timeout, the zone becomes unknown and blocks standard arming until it receives a fresh reading.</p>
+      {available?<dl className="security-timeout-current">
+        <dt>Current timeout</dt>
+        <dd>{timeoutDuration(timeout)}{timeout>=60?<span className="muted"> ({timeout.toLocaleString()} minutes)</span>:null}</dd>
+      </dl>:<p className="notice warning" role="status">The reading timeout is unavailable.</p>}
+      {manage&&available?<form className="security-settings-form" onSubmit={submit}>
+        {!disconnected&&!canChange?<p className="notice warning" role="status">Disarm every area before changing the reading timeout.</p>:null}
+        <Field label="Reading timeout" type="number" min={1} max={43200} step={1} required inputMode="numeric" unit="minutes"
+          disabled={blocked||conflict} value={value} aria-describedby="security-timeout-help"
+          onChange={event=>{setDraft({value:event.target.value,base:draft&&Number(draft.value)!==timeout?draft.base:timeout});setError('');}}/>
+        {conflict&&!busy?<p className="notice warning" role="status">The saved timeout changed while you were editing. Reset your draft to use the current value.</p>:null}
+        {error&&!conflict?<p className="notice critical" role="alert">{error}</p>:null}
+        <div className="security-settings-actions">
+          <button type="submit" className="primary" disabled={!canSave}>{busy?'Saving…':'Save reading timeout'}</button>
+          {draft!==null?<button type="button" onClick={reset} disabled={busy}>Reset draft</button>:null}
+        </div>
+      </form>:null}
+    </div>
+  </section>;
 }
 
 function AreaPanel({area,zones,incidents,now,control,manage,removeAllowed,onCommand,onEdit,onRemove,onZones}){

@@ -37,8 +37,8 @@ incidents if both areas are armed. Disarming or acknowledging House does not
 disarm or acknowledge Garage. Each area keeps its own entry/exit delays,
 Home/Away mode, schedules, alarm memory and alert actions.
 
-The zone's name, trigger condition, Entry/Instant type, reporting timeout,
-enabled state and Home-mode exclusion are shared settings. A manual timed or
+The zone's name, trigger condition, Entry/Instant type, enabled state and
+Home-mode exclusion are shared settings. A manual timed or
 indefinite bypass in the Security panel also applies to the zone in **every
 assigned area**; the panel warns about that scope before applying it. The
 keypad's **Bypass and arm** confirmation instead applies only to the selected
@@ -56,6 +56,16 @@ application is upgraded. Memberships are stored separately, so the upgrade does
 not rewrite the existing zone records. An older open browser editing the
 unchanged primary area also preserves the shared memberships; refresh to use
 the multiple-area editor.
+
+## Reading timeout
+
+Open **Security → Settings** to set the reading timeout for all zones. The
+timeout measures the age of the latest report for each zone's configured
+property. A reading older than the limit makes the zone unknown. Disarm all
+areas before saving a new timeout.
+
+New installations default to seven days. When an existing installation has
+several per-zone timeouts, the shortest becomes the initial shared value.
 
 ## Operate the panel
 

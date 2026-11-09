@@ -11,11 +11,11 @@ const memberIds=zone=>Array.isArray(zone?.areaIds)&&zone.areaIds.length?zone.are
 const editableArea=area=>area?.mode==='disarmed'&&!['exit_delay','entry_delay'].includes(area.status);
 const initial=(kind,item,state,areaId)=>{
   if(kind==='area')return {name:'',entryDelaySec:30,exitDelaySec:45,enabled:true,...item};
-  if(kind==='zone')return {name:'',deviceId:'',property:'contact',operator:'eq',value:false,type:'instant',homeBypass:false,enabled:true,freshnessMin:10080,...item,areaIds:item?memberIds(item):[areaId||state.areas.find(editableArea)?.id].filter(Boolean)};
+  if(kind==='zone')return {name:'',deviceId:'',property:'contact',operator:'eq',value:false,type:'instant',homeBypass:false,enabled:true,...item,areaIds:item?memberIds(item):[areaId||state.areas.find(editableArea)?.id].filter(Boolean)};
   if(kind==='schedule')return {name:'',areaId:areaId||state.areas[0]?.id||'',days:[1,2,3,4,5],time:'22:00',timezone:state.timezone||'UTC',mode:'away',enabled:false,...item};
   return {name:'',areaId:areaId||state.areas[0]?.id||'',kind:'mqtt',networkId:state.networks[0]?.id||'',topic:'security/alerts',payloadTemplate:payloadExample,subject:'Security alarm: {{area}}',text:'Security alarm in {{area}}.\nZone: {{zone}}\nDevice: {{device}}\nMode: {{mode}}\nTime: {{timestamp}}',subscriptionIds:[],enabled:false,...item};
 };
-const fieldsFor={area:['id','name','entryDelaySec','exitDelaySec','enabled'],zone:['id','name','areaIds','deviceId','property','operator','value','type','homeBypass','enabled','freshnessMin'],schedule:['id','name','areaId','days','time','timezone','mode','enabled'],action:['id','name','areaId','kind','networkId','topic','payloadTemplate','subject','text','subscriptionIds','enabled']};
+const fieldsFor={area:['id','name','entryDelaySec','exitDelaySec','enabled'],zone:['id','name','areaIds','deviceId','property','operator','value','type','homeBypass','enabled'],schedule:['id','name','areaId','days','time','timezone','mode','enabled'],action:['id','name','areaId','kind','networkId','topic','payloadTemplate','subject','text','subscriptionIds','enabled']};
 function AreaSelect({draft,change,state}){return <Field label="Area"><select required value={draft.areaId} onChange={e=>change('areaId',e.target.value)}><option value="" disabled>Choose an area</option>{state.areas.map(area=><option value={area.id} key={area.id} disabled={area.mode!=='disarmed'||['exit_delay','entry_delay'].includes(area.status)}>{area.name}{area.mode!=='disarmed'?' · armed':''}</option>)}</select></Field>;}
 function Check({children,checked,onChange,disabled=false}){return <label className="checkbox-field"><input type="checkbox" checked={checked} disabled={disabled} onChange={e=>onChange(e.target.checked)}/>{children}</label>;}
 
@@ -114,8 +114,7 @@ export function SecurityForm({kind,item,state,areaId,onClose,onSave,onAccount}){
       <Field label="Zone type"><select value={draft.type} onChange={e=>change('type',e.target.value)}><option value="instant">Instant</option><option value="entry">Entry</option></select></Field>
       <Check checked={draft.homeBypass} onChange={value=>change('homeBypass',value)}>Bypass in Home mode</Check>
       <Check checked={draft.enabled} onChange={value=>change('enabled',value)}>Zone enabled</Check>
-      <details className="security-advanced"><summary>Advanced zone settings</summary><Field label="Reading timeout" type="number" min={1} max={43200} unit="minutes" required value={draft.freshnessMin} onChange={e=>change('freshnessMin',Number(e.target.value))} hint="New zones default to 7 days. An older reading makes the zone unknown and blocks arming."/></details>
-      <p className="security-form-footnote">Only a fresh device activation can raise an alarm. The zone waits for a fresh reading before it is ready to arm.</p>
+      <p className="security-form-footnote">This zone uses the shared reading timeout under Security → Settings. It waits for a fresh reading before it is ready to arm.</p>
     </>:null}
     {kind==='schedule'?<>
       <div className="security-field-pair"><Field label="Time"><input type="time" required value={draft.time} onInput={e=>change('time',e.currentTarget.value)} onChange={e=>change('time',e.target.value)}/></Field><Field label="Set area to"><select value={draft.mode} onChange={e=>change('mode',e.target.value)}>{Object.entries(modeNames).map(([value,name])=><option key={value} value={value}>{name}</option>)}</select></Field></div>

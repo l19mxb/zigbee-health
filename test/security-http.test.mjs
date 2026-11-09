@@ -14,10 +14,10 @@ const password='synthetic-security-admin';
 const userPassword='synthetic-security-user';
 const originalPermissions=['viewHealth','viewReports','acknowledge','manageShunts','manageDevices','manageBrokers','manageThresholds','manageEmail','manageNotifications'].sort();
 
-async function fixture(){
+async function fixture({realSecurity=false}={}){
   const s=new Store(),e=new Engine(s),calls=[],security={state:()=>({areas:[{id:'area-one',name:'Ground floor',mode:'disarmed'}],zones:[{id:'zone-one',name:'Front door',areaId:'area-one'}],actions:[{id:'action-one',topic:'security/private-template',payloadTemplate:'private configured text'}],schedules:[{id:'schedule-one',time:'22:00'}],deliveries:[{id:'delivery-one',status:'uncertain',context:'private payload',error:'Delivery not confirmed'}],devices:[{id:'device-one',name:'Door contact',networkId:'network-one',properties:[{property:'contact',type:'binary',valueOn:false,valueOff:true}],password:'DO NOT EXPOSE DEVICE PASSWORD'}],networks:[{id:'network-one',label:'Zigbee network',enabled:true,connected:true,host:'private-broker.fixture.test',username:'private-broker-user',password:'DO NOT EXPOSE BROKER PASSWORD'}],summary:{armed:0},timezone:'UTC'})};
   for(const method of ['saveArea','removeArea','saveZone','removeZone','saveSchedule','removeSchedule','saveAction','removeAction','command','bypassZone','clearBypass'])security[method]=(...args)=>{calls.push({method,args});return {id:'result-one',name:'Result'};};
-  const server=createApp(e,{password,security,securityActions:{stats:()=>({mqttPublications:0})}});
+  const server=createApp(e,{password,security:realSecurity?undefined:security,securityActions:{stats:()=>({mqttPublications:0})}});
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
   const url='http://127.0.0.1:'+server.address().port;
   const request=(route,body,cookie,headers={})=>new Promise((resolve,reject)=>{
@@ -97,5 +97,29 @@ test('Security writes retain cross-origin protection and disabled users cannot u
     assert.equal((await f.request('users/update',{id:target.id,enabled:false},f.admin.cookie)).status,200);
     assert.equal((await f.request('security',undefined,controller.cookie)).status,401);assert.equal((await f.request('security/command',{areaId:'area-one',action:'disarm'},controller.cookie)).status,401);assert.equal(f.calls.length,0);
     assert.equal((await f.request('health')).body.mqttPublications,0);
+  }finally{await f.close();}
+});
+
+test('global Security timeout requires configuration permission and rejects stale saves',async()=>{
+  const f=await fixture({realSecurity:true});
+  try{
+    const reader=await f.create('security-reader',['viewSecurity']);
+    const manager=await f.create('security-manager',['manageSecurity']);
+    const route='security/settings',body={readingTimeoutMin:120,expectedReadingTimeoutMin:10080};
+    assert.equal((await f.request('security',undefined,reader.cookie)).body.readingTimeoutMin,10080);
+    assert.equal((await f.request(route,body)).status,401);
+    assert.equal((await f.request(route,body,reader.cookie)).status,403);
+    assert.equal((await f.request(route,body,manager.cookie,{Origin:'https://other.fixture.test'})).status,403);
+    assert.equal((await f.request(route,{readingTimeoutMin:120},manager.cookie)).status,400);
+    assert.equal((await f.request(route,{...body,actor:'admin'},manager.cookie)).status,400);
+    assert.equal(f.s.get('securityReadingTimeoutMin'),null);
+    const result=await f.request(route,body,manager.cookie);
+    assert.equal(result.status,200);
+    assert.deepEqual(result.body,{readingTimeoutMin:120});
+    assert.equal((await f.request(route,{...body,readingTimeoutMin:60},manager.cookie)).status,409);
+    const state=(await f.request('security',undefined,reader.cookie)).body;
+    assert.equal(state.readingTimeoutMin,120);
+    assert.equal(state.canChangeReadingTimeout,true);
+    assert.deepEqual(state.events.filter(event=>event.type==='reading_timeout_updated').map(event=>event.actor),['security-manager']);
   }finally{await f.close();}
 });

@@ -306,6 +306,7 @@ export class FloorPlan {
     const live = included.some(device => !statusOnly || linked.has(device.id));
     const incidents = live && permissions.health ? this.store.all('SELECT * FROM incidents WHERE processed_at IS NULL') : [];
     const alarms = live && permissions.security ? new Set(this.security.activeIncidents().map(incident => incident.zoneId)) : new Set();
+    const readingTimeoutMin = live && permissions.security ? this.security.readingTimeoutMin() : undefined;
     const status = included.map(device => {
       const network = networks.get(device.networkId);
       const item = {id: device.id, name: device.name, networkLabel: network?.label ?? 'Missing broker', placeable: canPlaceDevice(device)};
@@ -322,7 +323,7 @@ export class FloorPlan {
       }
       if (permissions.security) {
         const visibleZones = (zones.get(device.id) ?? []).map(zone => {
-          const view = this.security.zoneState(zone);
+          const view = this.security.zoneState(zone, readingTimeoutMin);
           const contactOpen = /(?:^|\.)contact(?:$|_)/i.test(view.property) && view.known && typeof view.observedValue === 'boolean'
             ? !view.observedValue : null;
           const areas = view.areaStates.map(({areaId, areaName, mode, status, bypassed, homeExcluded}) => (
