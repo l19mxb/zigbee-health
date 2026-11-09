@@ -85,3 +85,9 @@
 @media(max-width:760px){.header-controls .theme-control{flex:0 0 auto}.header-controls .theme-control select{min-width:95px;max-width:95px;width:95px}.theme-control{gap:5px;font-size:11px}.login-theme{margin-bottom:12px}}
 /* Device names remain readable when trend-report access is not granted. */
 .device-name:disabled{opacity:1;color:inherit;cursor:default}
+.alarm-stack-heading {flex-wrap:wrap;gap:8px 15px}
+.alarm-stack-actions {display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-left:auto}
+@media(max-width:760px){
+  .alarm-stack-actions {margin-left:0}
+  .alarm-stack-actions button {font-size:11px;padding:6px 9px;white-space:normal}
+}

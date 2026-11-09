@@ -14,7 +14,7 @@ import {FloorPlan,FloorPlanError,floorPlanBodyLimit,floorPlanPermissions} from '
 
 const previewUser={id:'local-preview',username:'admin',displayName:'Local preview',role:'admin',enabled:true};
 const adminChanges=new Set(['/api/users','/api/users/update','/api/users/reset-password','/api/users/revoke-sessions','/api/users/keypad','/api/kiosk/settings']);
-const routeFeatures=new Map([['/api/thresholds','manageThresholds'],['/api/device','manageDevices'],['/api/networks','manageBrokers'],['/api/email','manageEmail'],['/api/push/settings','manageNotifications'],...['retire','restore','delete-history','link','unlink'].map(action=>['/api/devices/'+action,'manageDevices']),['/api/alarms/acknowledge','acknowledge'],['/api/alarms/process','acknowledge'],['/api/shunts','manageShunts'],['/api/shunts/cancel','manageShunts']]);
+const routeFeatures=new Map([['/api/thresholds','manageThresholds'],['/api/device','manageDevices'],['/api/networks','manageBrokers'],['/api/email','manageEmail'],['/api/push/settings','manageNotifications'],...['retire','restore','delete-history','link','unlink'].map(action=>['/api/devices/'+action,'manageDevices']),...['acknowledge','process','process-all'].map(action=>['/api/alarms/'+action,'acknowledge']),['/api/shunts','manageShunts'],['/api/shunts/cancel','manageShunts']]);
 for(const route of ['areas','zones','schedules','actions','remove-area','remove-zone','remove-schedule','remove-action','areas/delete','zones/delete','schedules/delete','actions/delete'])routeFeatures.set('/api/security/'+route,'manageSecurity');
 for(const route of ['command','bypass','clear-bypass','zones/bypass','zones/clear-bypass'])routeFeatures.set('/api/security/'+route,'controlSecurity');
 routeFeatures.set('/api/security/push-test','viewSecurity');
@@ -170,6 +170,10 @@ export function createApp(engine,{collectors=null,push=null,security=null,securi
       }
       if(route==='/api/alarms/acknowledge'&&req.method==='POST'){engine.acknowledge(body.ids,actor,String(body.note||'').slice(0,500));return json(res,200,{ok:true});}
       if(route==='/api/alarms/process'&&req.method==='POST'){engine.process(body.id,actor,String(body.note||'').slice(0,500));return json(res,200,{ok:true});}
+      if(route==='/api/alarms/process-all'&&req.method==='POST'){
+        if(Object.keys(body).length)return json(res,400,{error:'Process all restored alarms does not take any fields'});
+        return json(res,200,{processed:engine.processAllRestored(actor)});
+      }
       if(route==='/api/shunts'&&req.method==='POST')return json(res,201,engine.shunt(body,actor));
       if(route==='/api/shunts/cancel'&&req.method==='POST'){engine.cancelShunt(body.id,actor);return json(res,200,{ok:true});}
       if(route==='/api/thresholds'&&req.method==='POST'){

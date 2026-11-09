@@ -129,6 +129,7 @@ test('the server rejects viewer operations and all lower-role configuration or a
     for(const [route,body] of [
       ['alarms/acknowledge',{ids:['fixture-alarm'],note:'Forged acknowledgement'}],
       ['alarms/process',{id:'fixture-restored-alarm'}],
+      ['alarms/process-all',{}],
       ['shunts',{scopeType:'device',scopeId:f.device.id,durationMin:60,reason:'Forged shunt'}],
       ['shunts/cancel',{id:'some-shunt'}]
     ])assert.equal((await f.request(route,body,signedIn.session)).status,403,route);
@@ -152,6 +153,28 @@ test('operator acknowledgement, restored processing and shunting use the authent
     for(const type of ['acknowledged','processed','shunt_created','shunt_cancelled']){
       const events=f.s.all('SELECT * FROM events WHERE type=?',type);assert.equal(events.length,1);assert.equal(events[0].actor,'operator-one');
     }
+  }finally{await f.close();}
+});
+
+test('operator bulk processing is server-selected and retries do not process or audit an alarm twice',async()=>{
+  const f=await fixture();
+  try{
+    const route='alarms/process-all';
+    assert.equal((await f.request(route,{})).status,401);
+    await f.create('operator-one','operator');
+    const operator=await f.login('operator-one');
+    assert.equal((await f.request(route,{ids:['fixture-alarm'],actor:'admin'},operator.session)).status,400);
+    const first=await f.request(route,{},operator.session);
+    assert.equal(first.status,200);
+    assert.deepEqual(first.body,{processed:1});
+    const retry=await f.request(route,{},operator.session);
+    assert.equal(retry.status,200);
+    assert.deepEqual(retry.body,{processed:0});
+    const state=await f.request('state',undefined,operator.session);
+    assert.deepEqual(state.body.alarms.map(alarm=>alarm.id),['fixture-alarm']);
+    assert.deepEqual(f.s.all("SELECT incident_id,actor FROM events WHERE type='processed'").map(event=>({...event})),[
+      {incident_id:'fixture-restored-alarm',actor:'operator-one'}
+    ]);
   }finally{await f.close();}
 });
 

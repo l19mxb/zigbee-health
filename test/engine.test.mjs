@@ -14,6 +14,42 @@ test('retained sensor messages never establish a live baseline or manufacture ba
 test('retained availability online does not turn an unheard sensor healthy',()=>{const f=fixture();f.availability('online','a','Sensor',true);f.e.tick();assert.equal(f.e.snapshot().devices[0].status,'unknown');f.s.close();});
 test('same friendly name on two networks remains distinct; rename retains IEEE identity and history',()=>{const f=fixture();f.network('b');f.inventory('b');f.state();f.state({battery:40},'b');assert.equal(f.s.devices().length,2);assert.notEqual(f.s.devices()[0].id,f.s.devices()[1].id);f.inventory('a','Renamed');assert.equal(f.s.device(f.id).name,'Renamed');assert.equal(f.e.report(f.id).samples.length,1);assert.equal(f.s.devices('b')[0].name,'Sensor');f.s.close();});
 test('acknowledgement preserves the active fault and active alarms cannot be processed',()=>{const f=fixture();f.state();f.availability('offline');f.e.tick();const i=active(f)[0];f.e.acknowledge([i.id],'Test operator','Investigating');assert.equal(f.e.snapshot().devices[0].status,'offline');assert.ok(f.e.snapshot().alarms[0].ack_at);assert.throws(()=>f.e.process(i.id,'Test operator'),/Only restored/);f.availability('online');f.e.tick();f.e.process(i.id,'Test operator');assert.equal(f.e.snapshot().alarms.length,0);assert.equal(f.s.all("SELECT * FROM events WHERE type='acknowledged'")[0].message,'Investigating');f.s.close();});
+test('bulk processing audits restored incidents atomically and keeps a recurring active fault in the stack',()=>{
+  const f=fixture();
+  try{
+    f.state({battery:10,linkquality:40});f.e.tick();
+    f.advance(1000);f.state();f.e.tick();
+    const restored=f.e.snapshot().alarms;
+    assert.equal(restored.length,2);
+    assert.ok(restored.every(alarm=>alarm.restored_at!==null));
+    f.advance(1000);f.state({battery:10});f.e.tick();
+    const recurrence=active(f)[0];
+    assert.equal(recurrence.category,'battery');
+    assert.ok(!restored.some(alarm=>alarm.id===recurrence.id));
+
+    const originalEvent=f.s.event.bind(f.s);
+    let audits=0;
+    f.s.event=(type,...args)=>{
+      if(type==='processed'&&++audits===2)throw Error('Injected audit failure');
+      originalEvent(type,...args);
+    };
+    assert.throws(()=>f.e.processAllRestored('Fixture operator'),/Injected audit failure/);
+    assert.equal(f.s.all('SELECT * FROM incidents WHERE processed_at IS NOT NULL').length,0);
+    assert.equal(f.s.all("SELECT * FROM events WHERE type='processed'").length,0);
+    f.s.event=originalEvent;
+
+    const at=f.now();
+    assert.equal(f.e.processAllRestored('Fixture operator'),2);
+    f.advance(1000);
+    assert.equal(f.e.processAllRestored('Fixture operator'),0);
+    assert.deepEqual(f.e.snapshot().alarms.map(alarm=>alarm.id),[recurrence.id]);
+    const processed=f.s.all('SELECT id,processed_at FROM incidents WHERE processed_at IS NOT NULL ORDER BY id');
+    assert.deepEqual(processed.map(row=>row.id),restored.map(alarm=>alarm.id).sort());
+    assert.ok(processed.every(row=>row.processed_at===at));
+    const events=f.s.all("SELECT incident_id,actor,at FROM events WHERE type='processed' ORDER BY incident_id");
+    assert.deepEqual(events.map(event=>({...event})),processed.map(row=>({incident_id:row.id,actor:'Fixture operator',at})));
+  }finally{f.s.close();}
+});
 test('repeated reports update a single incident instead of flooding the stack',()=>{const f=fixture();f.state({battery:12});for(let i=0;i<50;i++){f.advance(1000);f.state({battery:12});f.e.tick();}assert.equal(active(f).filter(i=>i.category==='battery').length,1);f.s.close();});
 test('fault persistence is bounded and pending conditions are visibly unhealthy',()=>{const f=fixture();f.s.set('thresholds',{...f.e.thresholds(),faultDelaySec:120});f.state({battery:12});f.e.tick();assert.equal(active(f).length,0);assert.equal(f.e.snapshot().devices[0].status,'issues');assert.ok(f.e.snapshot().devices[0].issues[0].pending);f.advance(119000);f.e.tick();assert.equal(active(f).length,0);f.advance(1000);f.e.tick();assert.equal(active(f).length,1);f.s.close();});
 test('battery hysteresis clears only at recovery threshold',()=>{const f=fixture();f.state({battery:20});f.e.tick();assert.equal(active(f)[0].category,'battery');f.state({battery:24});f.e.tick();assert.equal(active(f).length,1);f.state({battery:25});f.e.tick();assert.equal(active(f).length,0);assert.ok(f.e.snapshot().alarms[0].restored_at);f.s.close();});

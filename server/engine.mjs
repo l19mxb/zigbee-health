@@ -118,7 +118,30 @@ export class Engine extends DeviceLifecycle {
     if(!Array.isArray(ids)||ids.length<1||ids.length>100)throw Error('Select between 1 and 100 alarms');
     this.s.transaction(()=>{for(const id of ids){const i=this.s.one('SELECT * FROM incidents WHERE id=?',id);if(!i||i.processed_at)throw Error('Alarm is unavailable');if(i.ack_at)continue;this.s.run('UPDATE incidents SET ack_at=?,ack_by=? WHERE id=?',this.now(),actor,id);this.s.event('acknowledged',note||'Alarm acknowledged',{deviceId:i.device_id,networkId:i.network_id,incidentId:id,actor,at:this.now()});}});
   }
-  process(id,actor,note=''){const i=this.s.one('SELECT * FROM incidents WHERE id=?',id);if(!i||!i.restored_at)throw Error('Only restored alarms can be processed');this.s.transaction(()=>{this.s.run('UPDATE incidents SET processed_at=? WHERE id=?',this.now(),id);this.s.event('processed',note||'Restored alarm processed',{deviceId:i.device_id,networkId:i.network_id,incidentId:id,actor,at:this.now()});});}
+  #auditProcessed(incident,actor,at,note=''){
+    this.s.event('processed',note||'Restored alarm processed',{
+      deviceId:incident.device_id,networkId:incident.network_id,incidentId:incident.id,actor,at
+    });
+  }
+  process(id,actor,note=''){
+    this.s.transaction(()=>{
+      const incident=this.s.one('SELECT id,device_id,network_id,restored_at,processed_at FROM incidents WHERE id=?',id);
+      if(!incident||incident.restored_at===null)throw Error('Only restored alarms can be processed');
+      if(incident.processed_at!==null)return;
+      const at=this.now();
+      this.s.run('UPDATE incidents SET processed_at=? WHERE id=?',at,id);
+      this.#auditProcessed(incident,actor,at,note);
+    });
+  }
+  processAllRestored(actor){
+    return this.s.transaction(()=>{
+      const at=this.now();
+      const incidents=this.s.all(`UPDATE incidents SET processed_at=?
+        WHERE restored_at IS NOT NULL AND processed_at IS NULL RETURNING id,device_id,network_id`,at);
+      for(const incident of incidents)this.#auditProcessed(incident,actor,at);
+      return incidents.length;
+    });
+  }
   shunt({scopeType,scopeId,category=null,durationMin=null,reason},actor){
     if(!['device','network'].includes(scopeType)||!(scopeType==='device'?this.s.device(scopeId):this.s.network(scopeId)))throw Error('Select a valid shunt target');
     if(scopeType==='device'&&this.s.device(scopeId).retiredAt)throw Error('Retired devices cannot be shunted');
