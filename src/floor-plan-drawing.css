@@ -1,0 +1,59 @@
+.floor-stage.drawing {
+  cursor: crosshair;
+  box-shadow: 0 0 0 2px var(--teal);
+}
+
+.floor-stage.drawing:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.floor-drawing-controls small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+}
+
+.floor-drawing-preview {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.floor-drawing-fill {
+  fill: var(--teal);
+  fill-opacity: .18;
+}
+
+.floor-drawing-outline, .floor-drawing-guide {
+  fill: none;
+  stroke: var(--teal-ink);
+  stroke-width: 2.5px;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.floor-drawing-guide {
+  stroke-dasharray: 5 4;
+}
+
+.floor-drawing-corner, .floor-drawing-crosshair {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.floor-drawing-corner {
+  background: var(--teal);
+  border: 1px solid white;
+}
+
+.floor-drawing-crosshair {
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--teal-ink);
+  box-shadow: 0 0 0 1px var(--floor-paper);
+}

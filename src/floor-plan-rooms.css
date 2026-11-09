@@ -1,0 +1,92 @@
+.floor-plan [data-tone="motion"] {
+  --room-accent:var(--ack-ink);
+  --pin-fill:#265e88;
+}
+.floor-plan [data-tone="good"] {--room-accent:var(--green)}
+.floor-plan [data-tone="open"] {--room-accent:var(--warning-ink)}
+.floor-plan [data-tone="warning"] {--room-accent:var(--warning)}
+.floor-plan [data-tone="alarm"] {--room-accent:var(--critical)}
+.floor-plan [data-tone="unknown"] {--room-accent:var(--muted)}
+
+.floor-stage .floor-room[data-tone]:not([data-tone="neutral"]) {
+  fill:color-mix(in srgb,var(--room-accent) 12%,var(--floor-paper));
+  stroke:var(--room-accent);
+}
+.floor-stage.has-image .floor-room[data-tone]:not([data-tone="neutral"]) {
+  fill:color-mix(in srgb,var(--room-accent) 16%,transparent);
+}
+.floor-stage .floor-room[data-tone="motion"],
+.floor-stage .floor-room[data-tone="alarm"] {
+  stroke-width:2.5px;
+}
+
+.floor-plan button.floor-room-label.floor-room-live-label {
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:1px;
+  width:max-content;
+  max-width:min(174px,60%);
+  min-height:0;
+  padding:3px 6px;
+  border:1px solid var(--room-accent,var(--border));
+  border-radius:5px;
+  background:var(--floor-paper);
+  color:var(--floor-ink);
+  line-height:1.25;
+}
+.floor-plan button.floor-room-label.floor-room-live-label:hover:not(:disabled),
+.floor-plan button.floor-room-label.floor-room-live-label:focus-visible {
+  z-index:3;
+  background:var(--surface);
+}
+.floor-room-name,.floor-room-metrics {
+  display:block;
+  max-width:100%;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.floor-room-name {font-weight:650}
+.floor-room-metrics {
+  font-size:10px;
+  font-weight:600;
+  font-variant-numeric:tabular-nums;
+  color:var(--room-accent,var(--muted));
+}
+
+.floor-room-details {
+  display:grid;
+  gap:12px;
+  overflow-wrap:anywhere;
+}
+.floor-room-device {
+  display:grid;
+  gap:5px;
+  padding-top:10px;
+  border-top:1px solid var(--border);
+}
+.floor-room-device h3 {font-size:14px}
+.floor-room-device dl {
+  display:grid;
+  grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+  gap:5px 14px;
+  margin:2px 0 0;
+  font-size:12px;
+}
+.floor-room-device dt {color:var(--muted)}
+.floor-room-device dd {margin:0}
+
+@media(max-width:560px) {
+  .floor-plan button.floor-room-label.floor-room-live-label {
+    max-width:min(109px,58%);
+    padding:2px 4px;
+  }
+  .floor-room-metrics {
+    display:-webkit-box;
+    -webkit-box-orient:vertical;
+    -webkit-line-clamp:2;
+    white-space:normal;
+    font-size:9px;
+  }
+}

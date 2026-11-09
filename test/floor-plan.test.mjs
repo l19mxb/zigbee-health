@@ -68,7 +68,7 @@ function fixture(store = new Store()) {
   security.command(area.id, 'arm_away', {}, 'Fixture');
   now += 1000;
   security.ingest(contactId, {contact: false});
-  return {store, engine, security, plan: new FloorPlan(engine, security)};
+  return {store, engine, security, plan: new FloorPlan(engine, security), advance: milliseconds => { now += milliseconds; }};
 }
 
 test('floor plans enforce revisions, preserve hidden attachments and project only permitted live layers', () => {
@@ -127,6 +127,93 @@ test('floor plans enforce revisions, preserve hidden attachments and project onl
     assert.deepEqual(Object.keys(status).sort(), ['devices', 'permissions', 'revision']);
     assert.equal(status.devices[0].name, 'Renamed contact');
     assert.equal(status.devices[0].security.alarm, true);
+  } finally {
+    store.close();
+  }
+});
+
+test('room-only devices stay live in read-only status polls and respect health and security permissions', () => {
+  const {store, engine, security, plan, advance} = fixture();
+  try {
+    const draft = layout();
+    draft.floors[0].markers = [];
+    draft.floors[0].rooms[0].deviceIds = [contactId];
+    plan.save(draft, full, 'Fixture');
+    security.ingest(contactId, {temperature: 22.6, humidity: 56, illuminance: 4381, illuminance_lux: 5, occupancy: true,
+      presence: false, motion: 'true', tamper: true, arbitrary: 491});
+    security.ingest(contactId, {temperature: 38, occupancy: false}, {retain: true});
+    security.ingest(contactId, {temperature: 39, occupancy: false}, {dup: true});
+    const readings = permissions => {
+      const status = plan.state({...permissions, edit: false}, true);
+      assert.deepEqual(status.devices.map(device => device.id), [contactId]);
+      return status.devices[0].readings;
+    };
+    const health = [{key: 'temperature', label: 'Temperature', value: 22.6, unit: '°C'},
+      {key: 'humidity', label: 'Humidity', value: 56, unit: '%'},
+      {key: 'illuminance', label: 'Illuminance', value: 5, unit: 'lx'}];
+    const activity = [{key: 'occupancy', label: 'Occupancy', value: true, unit: null},
+      {key: 'presence', label: 'Presence', value: false, unit: null}];
+    assert.deepEqual(readings(healthOnly), health);
+    assert.deepEqual(readings(securityOnly), activity);
+    assert.deepEqual(readings(full), [...health, ...activity]);
+
+    advance(61 * 60000);
+    engine.ingest('fixture-zigbee', 'zigbee2mqtt/Fixture contact', {battery: 75});
+    security.ingest(contactId, {battery: 75, temperature: 23, occupancy: false});
+    assert.deepEqual(readings(full).map(({key, value}) => [key, value]), [['temperature', 23], ['occupancy', false]]);
+
+    const network = store.network('fixture-zigbee');
+    store.saveNetwork({...network, connected: false});
+    assert.deepEqual(readings(full), []);
+    advance(1000);
+    store.saveNetwork({...network, connectedAt: engine.now()});
+    assert.deepEqual(readings(full), []);
+    security.ingest(contactId, {illuminance: 17, motion: false});
+    assert.deepEqual(readings(full).map(({key, value}) => [key, value]), [['illuminance', 17], ['motion', false]]);
+    store.saveDevice({...store.device(contactId), availability: 'offline'});
+    assert.deepEqual(readings(full), []);
+  } finally {
+    store.close();
+  }
+});
+
+test('room assignments preserve hidden and existing inactive devices and reject invalid changes atomically', () => {
+  const {store, plan} = fixture();
+  try {
+    const draft = layout();
+    draft.floors[0].markers = [];
+    const room = draft.floors[0].rooms[0];
+    room.deviceIds = [contactId, hiddenId];
+    draft.floors[1].rooms.push({...room, openings: [], deviceIds: [contactId]});
+    plan.save(draft, full, 'Fixture');
+    const secure = plan.state(securityOnly).layout;
+    assert.deepEqual(secure.floors[0].rooms[0].deviceIds, [contactId]);
+    assert.ok(!JSON.stringify(secure).includes(hiddenId));
+    secure.floors[0].rooms[0].name = 'Renamed entry';
+    plan.save(secure, securityOnly, 'Fixture');
+    assert.deepEqual(plan.state(full).layout.floors[0].rooms[0].deviceIds, [contactId, hiddenId]);
+
+    for (const [permissions, change, statusCode] of [
+      [securityOnly, draft => draft.floors[0].rooms.pop(), 403],
+      [securityOnly, draft => draft.floors[0].rooms[0].deviceIds.push(hiddenId), 403],
+      [full, draft => draft.floors[0].rooms[0].deviceIds.push(contactId), 400],
+      [full, draft => { draft.floors[0].rooms[0].deviceIds = Array(65).fill(contactId); }, 400],
+    ]) {
+      const attempted = plan.state(permissions).layout;
+      change(attempted);
+      assert.throws(() => plan.save(attempted, permissions, 'Fixture'), {statusCode});
+    }
+    assert.equal(plan.layout().revision, 2);
+
+    store.saveDevice({...store.device(contactId), retiredAt: Date.now()});
+    const inactive = plan.state(full).layout;
+    assert.deepEqual(plan.save(inactive, full, 'Fixture').layout.floors[0].rooms[0].deviceIds, [contactId, hiddenId]);
+    const newRoom = plan.state(full).layout;
+    newRoom.floors[0].rooms.push({...room, id: 'new-room', openings: [], deviceIds: [contactId]});
+    assert.throws(() => plan.save(newRoom, full, 'Fixture'), /Retired or excluded devices cannot be added/);
+    const unlinked = plan.state(full).layout;
+    unlinked.floors[0].rooms[0].deviceIds = [hiddenId];
+    assert.deepEqual(plan.save(unlinked, full, 'Fixture').layout.floors[0].rooms[0].deviceIds, [hiddenId]);
   } finally {
     store.close();
   }
@@ -271,7 +358,7 @@ test('native HTTP gates floor plans and rechecks editing permissions after the l
   }
 });
 
-test('the existing database backup includes floor metadata, marker IDs and image bytes', async () => {
+test('the existing database backup includes floor metadata, room assignments, marker IDs and image bytes', async () => {
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'zigbee-floor-backup-'));
   const source = path.join(folder, 'source', 'health.db');
   const target = path.join(folder, 'backup');
@@ -280,7 +367,9 @@ test('the existing database backup includes floor metadata, marker IDs and image
     store = new Store(source);
     const {plan} = fixture(store);
     const tables = store.all("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
-    const saved = plan.save(layout(), full, 'Fixture');
+    const draft = layout();
+    draft.floors[0].rooms[0].deviceIds = [contactId, hiddenId];
+    const saved = plan.save(draft, full, 'Fixture');
     await createBackup(source, target);
     restored = new Store(path.join(target, 'health.db'));
     const engine = new Engine(restored);

@@ -54,6 +54,16 @@ inventory for a device, select it, and tap its position. Drag markers to move
 them and select **Save floor plan** when finished. Editors can also link a
 device marker to an imported door or window.
 
+To monitor a room, choose **Draw room**, tap its corners in order, and select
+**Finish room**. Name the room and tick the devices that describe it. You can
+also select an imported room and assign its devices. Room assignments work
+with or without individual device markers.
+
+After saving, the map shows current temperature, humidity and light readings
+with the **Health** layer, and motion, occupancy, presence and configured zone
+states with **Security**. Select a room for the individual device readings.
+Turn off **Pins** to see just the room view.
+
 To reuse a drawing from Alarm Dash, save its `/api/floorplan/layout` response
 as a JSON file and choose **Import Alarm Dash JSON**. This brings across the
 drawings, room outlines, labels, and door and window positions. Assign the

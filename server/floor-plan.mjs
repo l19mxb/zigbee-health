@@ -8,6 +8,18 @@ const imagePrefix = 'data:image/png;base64,';
 const pngSignature = Buffer.from('89504e470d0a1a0a', 'hex');
 const layoutKey = 'floorPlanLayout';
 const imageKey = id => 'floorPlanImage:' + id;
+const maximumRoomDevices = 64;
+const maximumRoomLinks = 2048;
+const roomMeasurements = [
+  {key: 'temperature', label: 'Temperature', unit: '°C', min: -273.15, max: 1000},
+  {key: 'humidity', label: 'Humidity', unit: '%', min: 0, max: 100},
+  {key: 'illuminance', label: 'Illuminance', unit: 'lx', min: 0, max: 1e6},
+];
+const roomActivity = [
+  {key: 'motion', label: 'Motion'},
+  {key: 'occupancy', label: 'Occupancy'},
+  {key: 'presence', label: 'Presence'},
+];
 
 export class FloorPlanError extends Error {
   constructor(message, statusCode = 400) {
@@ -102,7 +114,7 @@ function imageSize(value, width, height) {
 }
 
 function normalizeRoom(input, roomIds, openingIds) {
-  fields(input, ['id', 'name', 'points', 'label', 'openings'], 'room');
+  fields(input, ['id', 'name', 'points', 'label', 'openings', 'deviceIds'], 'room');
   const id = identifier(input.id, 'room');
   unique(roomIds, id, 'room ID');
   const points = list(input.points, 64, 'room points').map(point);
@@ -128,9 +140,23 @@ function normalizeRoom(input, roomIds, openingIds) {
 
 const canPlaceDevice = device => !device.retiredAt && !device.disabled;
 
-function normalizeLayout(input, visibleDevices, previousIds) {
+function normalizeRoomDevices(input, visibleDevices, previousRoom) {
+  const previousIds = new Set(previousRoom?.deviceIds);
+  const seen = new Set();
+  return list(input ?? [], maximumRoomDevices, 'room devices').map(id => {
+    const device = visibleDevices.get(id);
+    requireValue(device, 'Choose a room device you can view', 403);
+    requireValue(canPlaceDevice(device) || previousIds.has(id), 'Retired or excluded devices cannot be added to a room', 403);
+    unique(seen, id, 'room device');
+    return id;
+  });
+}
+
+function normalizeLayout(input, visibleDevices, previous) {
   const floorIds = new Set();
   const marked = new Set();
+  const previousIds = new Set(previous.floors.flatMap(floor => floor.markers.map(marker => marker.deviceId)));
+  const previousFloors = new Map(previous.floors.map(floor => [floor.id, floor]));
   let imageBytes = 0;
   const floors = list(input.floors, 8, 'floors').map(floor => {
     fields(floor, ['id', 'name', 'width', 'height', 'image', 'rooms', 'markers'], 'floor');
@@ -143,7 +169,12 @@ function normalizeLayout(input, visibleDevices, previousIds) {
     requireValue(imageBytes <= totalImageLimit, 'Floor plan backgrounds exceed 5 MiB');
     const openingIds = new Set();
     const roomIds = new Set();
-    const rooms = list(floor.rooms ?? [], 100, 'rooms').map(room => normalizeRoom(room, roomIds, openingIds));
+    const previousRooms = new Map(previousFloors.get(id)?.rooms.map(room => [room.id, room]));
+    const rooms = list(floor.rooms ?? [], 100, 'rooms').map(room => {
+      const normalized = normalizeRoom(room, roomIds, openingIds);
+      const deviceIds = normalizeRoomDevices(room.deviceIds, visibleDevices, previousRooms.get(normalized.id));
+      return deviceIds.length ? {...normalized, deviceIds} : normalized;
+    });
     const attached = new Set();
     const markers = list(floor.markers ?? [], 1024, 'markers').map(marker => {
       fields(marker, ['deviceId', 'position', 'openingId'], 'marker');
@@ -188,6 +219,23 @@ function preserveHiddenMarkers(previous, next, visibleDevices, currentIds) {
   }
   requireValue(next.floors.every(floor => floor.markers.length <= 1024)
     && next.floors.reduce((count, floor) => count + floor.markers.length, 0) <= 2048, 'Too many floor plan markers');
+}
+
+function preserveHiddenRoomDevices(previous, next, visibleDevices, currentIds) {
+  for (const oldFloor of previous.floors) {
+    const floor = next.floors.find(item => item.id === oldFloor.id);
+    const rooms = new Map(floor?.rooms.map(room => [room.id, room]));
+    for (const oldRoom of oldFloor.rooms) {
+      const hidden = (oldRoom.deviceIds ?? []).filter(id => currentIds.has(id) && !visibleDevices.has(id));
+      if (!hidden.length) continue;
+      const room = rooms.get(oldRoom.id);
+      requireValue(room, 'This room contains device assignments you cannot edit', 403);
+      room.deviceIds = [...(room.deviceIds ?? []), ...hidden];
+      requireValue(room.deviceIds.length <= maximumRoomDevices, 'Too many devices assigned to this room');
+    }
+  }
+  const linkCount = next.floors.reduce((count, floor) => count + floor.rooms.reduce((sum, room) => sum + (room.deviceIds?.length ?? 0), 0), 0);
+  requireValue(linkCount <= maximumRoomLinks, 'Too many room device assignments');
   requireValue(Buffer.byteLength(JSON.stringify(next)) <= floorPlanBodyLimit, 'The saved floor plan exceeds 8 MiB', 413);
 }
 
@@ -218,23 +266,56 @@ export class FloorPlan {
     return {devices, networks, zones, allDevices};
   }
 
+  deviceReadings(device, network, permissions) {
+    const record = this.security?.readings?.get(device.id);
+    const epoch = network?.connectedAt ?? 0;
+    if (!record || record.epoch !== epoch || !network || network.mode === 'mqtt' || this.engine.sourceStatus(network) !== 'online'
+      || !canPlaceDevice(device) || device.inventoryPresent === false || device.availability === 'offline') return [];
+    const thresholds = this.engine.thresholds(device);
+    const timeout = device.power === 'battery' ? thresholds.batteryTimeoutMin : thresholds.mainsTimeoutMin;
+    const earliest = Math.max(epoch, this.engine.now() - timeout * 60000);
+    const valueOf = property => {
+      const reading = record.values.get(property);
+      return reading?.at >= earliest ? reading.value : undefined;
+    };
+    const readings = [];
+    if (permissions.health) {
+      for (const {key, label, unit, min, max} of roomMeasurements) {
+        // Older Zigbee2MQTT versions could include both raw illuminance and lux.
+        const property = key === 'illuminance' && record.values.has('illuminance_lux') ? 'illuminance_lux' : key;
+        const value = valueOf(property);
+        if (Number.isFinite(value) && value >= min && value <= max) readings.push({key, label, value, unit});
+      }
+    }
+    if (permissions.security) {
+      for (const {key, label} of roomActivity) {
+        const value = valueOf(key);
+        if (typeof value === 'boolean') readings.push({key, label, value, unit: null});
+      }
+    }
+    return readings;
+  }
+
   state(permissions, statusOnly = false) {
     const {devices, networks, zones} = this.inventory(permissions);
     const layout = this.layout();
-    const placed = new Set(layout.floors.flatMap(floor => floor.markers.map(marker => marker.deviceId)));
-    const included = statusOnly && !permissions.edit ? devices.filter(device => placed.has(device.id)) : devices;
-    const live = included.some(device => !statusOnly || placed.has(device.id));
+    const linked = new Set(layout.floors.flatMap(floor => [
+      ...floor.markers.map(marker => marker.deviceId), ...floor.rooms.flatMap(room => room.deviceIds ?? []),
+    ]));
+    const included = statusOnly && !permissions.edit ? devices.filter(device => linked.has(device.id)) : devices;
+    const live = included.some(device => !statusOnly || linked.has(device.id));
     const incidents = live && permissions.health ? this.store.all('SELECT * FROM incidents WHERE processed_at IS NULL') : [];
     const alarms = live && permissions.security ? new Set(this.security.activeIncidents().map(incident => incident.zoneId)) : new Set();
     const status = included.map(device => {
       const network = networks.get(device.networkId);
       const item = {id: device.id, name: device.name, networkLabel: network?.label ?? 'Missing broker', placeable: canPlaceDevice(device)};
-      if (statusOnly && !placed.has(device.id)) {
+      if (statusOnly && !linked.has(device.id)) {
         if (permissions.health && !item.placeable) {
           item.health = {status: device.retiredAt ? 'retired' : 'excluded'};
         }
         return item;
       }
+      item.readings = this.deviceReadings(device, network, permissions);
       if (permissions.health) {
         const health = network ? this.engine.deviceState(device, network, incidents) : {status: 'unknown', issues: []};
         item.health = {status: health.status, battery: health.battery ?? null, lqi: health.lqi ?? null, issues: health.issues};
@@ -256,6 +337,10 @@ export class FloorPlan {
     if (statusOnly) return {revision: layout.revision, devices: status, permissions};
     const visibleIds = new Set(devices.map(device => device.id));
     const floors = layout.floors.map(floor => ({...floor, image: this.store.get(imageKey(floor.id)),
+      rooms: floor.rooms.map(({deviceIds, ...room}) => {
+        const visible = deviceIds?.filter(id => visibleIds.has(id));
+        return visible?.length ? {...room, deviceIds: visible} : room;
+      }),
       markers: floor.markers.filter(marker => visibleIds.has(marker.deviceId))}));
     return {layout: {...layout, floors}, devices: status, permissions};
   }
@@ -271,9 +356,9 @@ export class FloorPlan {
       const {devices, allDevices} = this.inventory(permissions);
       const visibleDevices = new Map(devices.map(device => [device.id, device]));
       const currentIds = new Set(allDevices.map(device => device.id));
-      const previousIds = new Set(previous.floors.flatMap(floor => floor.markers.map(marker => marker.deviceId)));
-      const next = normalizeLayout(input, visibleDevices, previousIds);
+      const next = normalizeLayout(input, visibleDevices, previous);
       preserveHiddenMarkers(previous, next, visibleDevices, currentIds);
+      preserveHiddenRoomDevices(previous, next, visibleDevices, currentIds);
       for (const floor of previous.floors) {
         if (!next.floors.some(item => item.id === floor.id)) this.store.run('DELETE FROM settings WHERE key=?', imageKey(floor.id));
       }
