@@ -6,6 +6,7 @@ zone issues, the date/time, and a numeric keypad. It has no dashboard navigation
 user administration, reports, broker settings or notification configuration.
 Unlit indicators are grey. The local Sound control enables short key pips and
 one-second arming/armed tones, with the preference remembered in that browser.
+A failed disarm plays two low pips. A successful disarm plays three rising chirps.
 Touch the keypad once after opening it to allow audio; the tablet's volume and
 output settings still apply. Sound does not replay old events after reconnection.
 

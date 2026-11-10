@@ -112,7 +112,7 @@ export default function Keypad({onSecurity,kiosk=false,requestApi=request}){
   const [soundEnabled,setSoundEnabled]=useState(()=>readKeypadSound()),[soundStatus,setSoundStatus]=useState({unlocked:false,supported:null});
   const [state,setState]=useState(null),[loading,setLoading]=useState(true),[connectionError,setConnectionError]=useState(''),[commandError,setCommandError]=useState(''),[message,setMessage]=useState(''),[busy,setBusy]=useState(false),[selection,setSelection]=useState(null),[pin,setPin]=useState(''),[carousel,setCarousel]=useState(0),[dialog,setDialog]=useState(null),[clock,setClock]=useState(Date.now()),[armReview,setArmReview]=useState(null);
   const pending=useRef(null),received=useRef(Date.now()),context=useRef(null),latestState=useRef(null),reviewRef=useRef(null),reviewEpoch=useRef(0),reviewFlight=useRef(false),sound=useRef(null);
-  function feedback(method,value){try{sound.current?.[method](value);}catch{/* Audio never changes keypad operations. */}}
+  function feedback(method,value){try{return sound.current?.[method](value);}catch{/* Audio never changes keypad operations. */}}
   useEffect(()=>{const audio=createKeypadAudio({enabled:soundEnabled,visible:!document.hidden,onStatus:setSoundStatus});sound.current=audio;const visibility=()=>audio.setVisible(!document.hidden),hide=()=>audio.setVisible(false),sync=event=>{if(event.key===keypadSoundKey||event.key===null){const enabled=readKeypadSound();setSoundEnabled(enabled);audio.setEnabled(enabled);}};document.addEventListener('visibilitychange',visibility);window.addEventListener('pagehide',hide);window.addEventListener('pageshow',visibility);window.addEventListener('storage',sync);return()=>{audio.destroy();if(sound.current===audio)sound.current=null;document.removeEventListener('visibilitychange',visibility);window.removeEventListener('pagehide',hide);window.removeEventListener('pageshow',visibility);window.removeEventListener('storage',sync);};},[]);
   function toggleSound(){const enabled=!soundEnabled;setSoundEnabled(enabled);writeKeypadSound(enabled);feedback('setEnabled',enabled);if(enabled)feedback('gesture',{pip:true});}
   function buttonFeedback(event){const button=event.target.closest?.('button');if(event.isTrusted&&button&&!button.disabled&&!button.hasAttribute('data-keypad-sound-toggle'))feedback('gesture',{pip:true});}
@@ -148,10 +148,25 @@ export default function Keypad({onSecurity,kiosk=false,requestApi=request}){
   const choose=ids=>{discardReview();setSelection(ids);setCarousel(0);setCommandError('');setMessage('');};
   async function command(action,all=false){
     if(!available)return;
-    const body={action,...(all?{all:true}:{areaIds:selectedIds}),...(action==='disarm'?{pin}:{})};
+    const disarm=action==='disarm';
+    const body={action,...(all?{all:true}:{areaIds:selectedIds}),...(disarm?{pin}:{})};
+    const attempt=disarm?feedback('beginDisarm'):null;
     setBusy(true);setCommandError('');setMessage('');discardReview();
-    try{const result=await requestApi(kiosk?'kiosk/command':'keypad/command',body);pending.current?.abort();feedback('accepted',result);setMessage((action==='disarm'?'Disarmed ':'Armed Away · ')+count(result.areaIds?.length||0,'area')+'.');await refresh();}
-    catch(error){setCommandError(error.message);if(kiosk&&error.status===403){setState(null);await refresh();}}
+    try{
+      const result=await requestApi(kiosk?'kiosk/command':'keypad/command',body);
+      if(disarm&&(result?.ok!==true||result.action!=='disarm'||!Array.isArray(result.areaIds)||!result.areaIds.length)){
+        throw Error('Disarm was not confirmed. Check the area status.');
+      }
+      pending.current?.abort();
+      feedback('accepted',result);
+      if(disarm)feedback('disarmOutcome',{attempt,ok:true});
+      setMessage((disarm?'Disarmed ':'Armed Away · ')+count(result.areaIds?.length||0,'area')+'.');
+      await refresh();
+    }catch(error){
+      if(disarm)feedback('disarmOutcome',{attempt,ok:false});
+      setCommandError(error.message);
+      if(kiosk&&error.status===403){setState(null);await refresh();}
+    }
     finally{setBusy(false);}
   }
   async function prepareBypass(intent){

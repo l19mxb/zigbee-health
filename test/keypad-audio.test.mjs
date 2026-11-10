@@ -58,11 +58,83 @@ test('accepted exit and observed fully armed each get one1s tone without duplica
   }finally{f.audio.destroy();}
 });
 
-test('zero-delay arm emits only Armed; silent disarm response permits the next fresh cycle cue',()=>{
+test('zero-delay arm emits only Armed; disarm state updates permit the next fresh cycle cue',()=>{
   const f=fixture();try{
     f.audio.observe(f.snapshot([f.idle()]));f.audio.gesture({pip:false});assert.equal(f.accept([f.armed()]),'armed');assert.equal(f.voices.length,1);f.audio.observe(f.snapshot([f.armed()]));assert.equal(f.voices.length,1);
     f.accept([f.idle()],'disarm');assert.equal(f.voices.length,1);assert.equal(f.accept([f.armed('a','cycle-b','home')],'arm_home'),'armed');assert.equal(f.voices.length,2);
   }finally{f.audio.destroy();}
+});
+
+test('an explicit failed disarm plays two brief descending pips once',()=>{
+  const f=fixture();
+  try{
+    f.audio.observe(f.snapshot([f.armed()]));
+    f.audio.gesture({pip:false});
+    assert.equal(f.audio.disarmOutcome({attempt:Symbol(),ok:false}),null);
+    const attempt=f.audio.beginDisarm();
+    assert.equal(f.audio.disarmOutcome({attempt,ok:false}),'disarmFailed');
+    assert.equal(f.audio.disarmOutcome({attempt,ok:true}),null);
+    assert.equal(f.voices.length,1);
+    const voice=f.voices[0];
+    assert.deepEqual(voice.frequency.events.map(({value})=>value),[520,370]);
+    assert.equal(Math.round((voice.stopCalls[0]-voice.started)*1000),190);
+    f.advance(200);
+    assert.equal(voice.disconnected,true);
+    assert.equal(f.timers.size,0);
+  }finally{f.audio.destroy();}
+});
+
+test('accepted explicit disarm chirps once even with latched alarm memory; passive updates stay silent',()=>{
+  const f=fixture();
+  try{
+    const withMemory={...f.idle(),status:'alarm',activeAlarmCount:1};
+    f.audio.observe(f.snapshot([f.armed(),f.armed('b')]));
+    f.audio.gesture({pip:false});
+    f.accept([withMemory,f.idle('b')],'disarm');
+    f.audio.observe(f.snapshot([withMemory,f.idle('b')]));
+    assert.equal(f.voices.length,0);
+
+    const attempt=f.audio.beginDisarm();
+    f.audio.gesture();
+    f.accept([withMemory,f.idle('b')],'disarm');
+    assert.equal(f.audio.disarmOutcome({attempt,ok:true}),'disarmed');
+    assert.equal(f.voices[0].disconnected,true);
+    const voice=f.voices[1];
+    assert.deepEqual(voice.frequency.events.map(({value})=>value),[660,830,990]);
+    assert.equal(Math.round((voice.stopCalls[0]-voice.started)*1000),270);
+    f.audio.observe(f.snapshot([withMemory,f.idle('b')]));
+    assert.equal(f.voices.length,2);
+  }finally{f.audio.destroy();}
+});
+
+test('disarm replies cannot replay across sound lifecycle changes or a late unlock',async()=>{
+  for(const operation of ['mute','hide','disconnect','scope','destroy']){
+    const f=fixture();
+    try{
+      f.audio.observe(f.snapshot([f.armed()]));
+      f.audio.gesture({pip:false});
+      const attempt=f.audio.beginDisarm();
+      if(operation==='mute'){f.audio.setEnabled(false);f.audio.setEnabled(true);}
+      if(operation==='hide'){f.audio.setVisible(false);f.audio.setVisible(true);}
+      if(operation==='disconnect')f.audio.disconnect();
+      if(operation==='scope')f.audio.observe(f.snapshot([f.armed(),f.idle('b')]));
+      if(operation==='destroy')f.audio.destroy();
+      assert.equal(f.audio.disarmOutcome({attempt,ok:true}),null,operation);
+      assert.equal(f.voices.length,0,operation);
+    }finally{f.audio.destroy();}
+  }
+  for(const delay of [100,401]){
+    const f=fixture({state:'suspended',resume:'defer'});
+    try{
+      f.audio.observe(f.snapshot([f.armed()]));
+      f.audio.gesture({pip:false});
+      f.audio.disarmOutcome({attempt:f.audio.beginDisarm(),ok:false});
+      f.advance(delay);
+      f.context.resolveResume();
+      await flush();
+      assert.equal(f.voices.length,delay===100?1:0);
+    }finally{f.audio.destroy();}
+  }
 });
 
 test('simultaneous visible areas coalesce to one Armed-priority tone and long voices never overlap',()=>{

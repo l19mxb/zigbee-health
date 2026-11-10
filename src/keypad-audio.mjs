@@ -1,6 +1,14 @@
 export const keypadSoundKey='zh-keypad-sound';
 export const keyPipMs=50,transitionPipMs=1000;
 const maximumObservationGap=10000,maximumPendingAge=400;
+const notesByCue={
+  key:[[880,0,keyPipMs/1000]],
+  arming:[[660,0,transitionPipMs/1000]],
+  armed:[[880,0,transitionPipMs/1000]],
+  disarmFailed:[[520,0,.07],[370,.11,.08]],
+  disarmed:[[660,0,.065],[830,.09,.065],[990,.18,.09]],
+};
+const isDisarmCue=kind=>kind==='disarmed'||kind==='disarmFailed';
 export function readKeypadSound(storage){try{return (storage??globalThis.localStorage)?.getItem(keypadSoundKey)!=='off';}catch{return true;}}
 export function writeKeypadSound(enabled,storage){try{(storage??globalThis.localStorage)?.setItem(keypadSoundKey,enabled?'on':'off');}catch{/* Sound preference can remain in memory. */}}
 const phase=area=>['home','away'].includes(area.targetMode)||area.status==='exit_delay'?'arming':['home','away'].includes(area.mode)?'armed':'idle';
@@ -21,21 +29,32 @@ export function createKeypadAudio({enabled=true,visible=true,now=()=>Date.now(),
   const factory=createContext||(()=>{const Context=globalThis.AudioContext||globalThis.webkitAudioContext;return Context?new Context():null;});
   let active=enabled,shown=visible,destroyed=false,context=null,resuming=null,unlocked=false,supported=null;
   let baseline=true,scope=null,lastAt=null,lastServerAt=null,states=new Map(),pipVoice=null,longVoice=null,pendingPip=null,pendingLong=null,pendingTimer=null;
+  let disarmAttempt=null;
   const status=()=>({enabled:active,unlocked,supported});
   function notify(){if(!destroyed)try{onStatus(status());}catch{/* Feedback must not affect the keypad. */}}
   function clearPending(){pendingPip=null;pendingLong=null;if(pendingTimer!==null){clearTimer(pendingTimer);pendingTimer=null;}}
   function stopVoice(voice){if(!voice)return;try{voice.oscillator.onended=null;voice.oscillator.stop();}catch{}try{voice.oscillator.disconnect();}catch{}try{voice.gain.disconnect();}catch{}if(voice.timer!==null)clearTimer(voice.timer);}
-  function silence(){clearPending();stopVoice(pipVoice);stopVoice(longVoice);pipVoice=null;longVoice=null;}
+  function silence(){clearPending();stopVoice(pipVoice);stopVoice(longVoice);pipVoice=null;longVoice=null;disarmAttempt=null;}
   function reset(){baseline=true;scope=null;lastAt=null;lastServerAt=null;states.clear();silence();}
   function tone(kind){
     if(destroyed||!active||!shown||!context||context.state!=='running')return false;
-    const isPip=kind==='key',duration=(isPip?keyPipMs:transitionPipMs)/1000;
-    if(isPip){stopVoice(pipVoice);pipVoice=null;}else{stopVoice(longVoice);longVoice=null;}
+    const isPip=kind==='key',isDisarm=isDisarmCue(kind),notes=notesByCue[kind];
+    const [,lastOffset,lastDuration]=notes.at(-1),duration=lastOffset+lastDuration;
+    const volume=isPip?0.025:isDisarm?0.03:0.035;
+    if(isPip||isDisarm){stopVoice(pipVoice);pipVoice=null;}
+    if(!isPip){stopVoice(longVoice);longVoice=null;}
     let oscillator,gain;
     try{
       oscillator=context.createOscillator();gain=context.createGain();const start=context.currentTime;
-      oscillator.type='sine';oscillator.frequency.setValueAtTime(kind==='arming'?660:880,start);
-      gain.gain.setValueAtTime(0,start);gain.gain.linearRampToValueAtTime(isPip?0.025:0.035,start+.004);gain.gain.setValueAtTime(isPip?0.025:0.035,start+duration-.008);gain.gain.linearRampToValueAtTime(0,start+duration);
+      oscillator.type='sine';
+      for(const [frequency,offset,length] of notes){
+        const onset=start+offset,end=onset+length;
+        oscillator.frequency.setValueAtTime(frequency,onset);
+        gain.gain.setValueAtTime(0,onset);
+        gain.gain.linearRampToValueAtTime(volume,onset+.004);
+        gain.gain.setValueAtTime(volume,end-.008);
+        gain.gain.linearRampToValueAtTime(0,end);
+      }
       oscillator.connect(gain);gain.connect(context.destination);
       const voice={oscillator,gain,timer:null};
       const finish=()=>{try{oscillator.disconnect();}catch{}try{gain.disconnect();}catch{}if(voice.timer!==null)clearTimer(voice.timer);if(pipVoice===voice)pipVoice=null;if(longVoice===voice)longVoice=null;};
@@ -54,7 +73,9 @@ export function createKeypadAudio({enabled=true,visible=true,now=()=>Date.now(),
     if(unlocked&&context?.state==='running'){tone(kind);return;}
     // Only a gesture already unlocking audio may carry a very fresh cue.
     if(!resuming)return;
-    if(kind==='key')pendingPip={at:now()};else pendingLong={kind:stronger(pendingLong?.kind,kind),at:now()};
+    if(kind==='key')pendingPip={at:now()};
+    else if(isDisarmCue(kind))pendingLong={kind,at:now()};
+    else if(!isDisarmCue(pendingLong?.kind))pendingLong={kind:stronger(pendingLong?.kind,kind),at:now()};
     if(pendingTimer===null)pendingTimer=setTimer(clearPending,maximumPendingAge);
   }
   function unlock(){
@@ -82,9 +103,21 @@ export function createKeypadAudio({enabled=true,visible=true,now=()=>Date.now(),
     for(const area of areas){const next=record(area);if(!quiet&&result.action!=='disarm')cue=stronger(cue,cueFor(states.get(area.id),next));states.set(area.id,next);}
     lastAt=timestamp;if(quiet){baseline=true;silence();return null;}if(cue)queue(cue);return cue;
   }
+  function beginDisarm(){
+    if(destroyed||!active||!shown)return null;
+    disarmAttempt=Symbol();
+    return disarmAttempt;
+  }
+  function disarmOutcome({attempt,ok}={}){
+    if(!attempt||attempt!==disarmAttempt||typeof ok!=='boolean')return null;
+    disarmAttempt=null;
+    const cue=ok?'disarmed':'disarmFailed';
+    queue(cue);
+    return cue;
+  }
   return {
     gesture({pip=true}={}){unlock();if(pip)queue('key');},
-    observe,accepted,
+    observe,accepted,beginDisarm,disarmOutcome,
     disconnect(){reset();},
     setVisible(value){const next=!!value;if(shown!==next){shown=next;reset();}},
     setEnabled(value){active=!!value;if(!active)silence();notify();},

@@ -214,7 +214,8 @@ green and grey, while its text continues to identify Not ready or Alarm.
 The keypad has a **Sound** control, remembered in that browser. When sound is
 enabled, valid keypad button presses give a short pip. An area starting its
 exit delay gives a one-second arming tone; reaching Armed gives a one-second
-confirmation tone. Immediate arming gives the Armed tone. Several area changes
+confirmation tone. Immediate arming gives the Armed tone. A failed disarm plays
+two low pips, and a successful disarm plays three rising chirps. Several area changes
 in the same update share one tone. Loading or reconnecting the page does not
 replay old state changes, and hiding or muting the keypad stops its sound.
 
