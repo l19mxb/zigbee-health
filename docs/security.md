@@ -205,9 +205,10 @@ area list appears above the keypad. The clock uses the dashboard timezone.
 Each area has three independent indicators. The green Ready LED is steady
 when its enabled zones are normal. The same green LED flashes when any enabled
 zone is open, active, unknown or in trouble, and while the area has alarm memory.
-The yellow Trouble LED stays on for zone trouble, and the red Armed LED stays
-on while the area is armed or arming. They can be lit together. Disabled areas
-or areas without enabled zones show an unavailable state instead of Ready.
+The yellow Trouble LED stays on for zone trouble. The red Armed LED stays
+on while arming or armed and flashes during a live alarm. They can be lit
+together. Disabled areas or areas without enabled zones show an unavailable
+state instead of Ready.
 Unlit LEDs are solid grey. The green flashing indicator alternates between
 green and grey, while its text continues to identify Not ready or Alarm.
 
@@ -218,6 +219,10 @@ confirmation tone. Immediate arming gives the Armed tone. A failed disarm plays
 two low pips, and a successful disarm plays three rising chirps. Several area changes
 in the same update share one tone. Loading or reconnecting the page does not
 replay old state changes, and hiding or muting the keypad stops its sound.
+
+When any area shown on the keypad is in live alarm, the open keypad sounds a
+siren. It stops when no shown area remains in live alarm, including when the last
+alarming area is disarmed. Alarm memory remains visible until it is reset.
 
 Interact with the keypad once to allow browser audio. Browsers require a user
 gesture to start or resume sound; see [Web Audio autoplay guidance](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API/Best_practices#autoplay_policy).

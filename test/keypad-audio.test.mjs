@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createKeypadAudio,keypadSoundKey,readKeypadSound,writeKeypadSound} from '../src/keypad-audio.mjs';
+import {createKeypadAudio,keypadSoundKey,liveKeypadAlarm,readKeypadSound,writeKeypadSound} from '../src/keypad-audio.mjs';
 
 function fixture({state='running',resume='resolve',factoryFailure=false,nodeFailure=false}={}){
   let time=0,serial=0,created=0;const timers=new Map(),voices=[],statuses=[];
@@ -135,6 +135,88 @@ test('disarm replies cannot replay across sound lifecycle changes or a late unlo
       assert.equal(f.voices.length,delay===100?1:0);
     }finally{f.audio.destroy();}
   }
+});
+
+test('keypad alarm requires an armed area rather than disarmed alarm memory or exit delay',()=>{
+  assert.equal(liveKeypadAlarm({mode:'away',status:'alarm'}),true);
+  assert.equal(liveKeypadAlarm({mode:'home',activeAlarmCount:2}),true);
+  assert.equal(liveKeypadAlarm({mode:'away',status:'armed',activeAlarmCount:0}),false);
+  assert.equal(liveKeypadAlarm({mode:'disarmed',status:'alarm',activeAlarmCount:2}),false);
+  assert.equal(liveKeypadAlarm({mode:'disarmed',targetMode:'away',status:'exit_delay'}),false);
+  assert.equal(liveKeypadAlarm(null),false);
+});
+
+test('unlock during an alarm starts one sweeping siren for multiple areas and disarm stops it at the last area',()=>{
+  const f=fixture();
+  const alarm=id=>({...f.armed(id),status:'alarm',activeAlarmCount:1});
+  const memory=id=>({...f.idle(id),status:'alarm',activeAlarmCount:1});
+  try{
+    f.audio.observe(f.snapshot([alarm('a'),alarm('b')]));
+    assert.equal(f.created,0);
+    f.audio.gesture({pip:false});
+    assert.equal(f.voices.length,1);
+    const voice=f.voices[0];
+    assert.equal(voice.type,'triangle');
+    assert.deepEqual(voice.frequency.events.map(({value})=>value),[540,1080]);
+    f.advance(420);
+    assert.deepEqual(voice.frequency.events.map(({value})=>value),[540,1080,1080,540]);
+    f.accept([memory('a')],'disarm');
+    f.audio.observe(f.snapshot([memory('a'),alarm('b')]));
+    assert.equal(f.voices.length,1);
+    assert.equal(voice.disconnected,false);
+    f.accept([memory('b')],'disarm');
+    assert.equal(voice.disconnected,true);
+    f.audio.observe(f.snapshot([memory('a'),memory('b')]));
+    assert.equal(f.voices.length,1);
+    assert.equal(f.timers.size,0);
+  }finally{f.audio.destroy();}
+});
+
+test('live siren stops on mute, hide, disconnect, clearing, stale state and destroy',()=>{
+  for(const operation of ['mute','hide','disconnect','clear','stale','destroy']){
+    const f=fixture();
+    const alarm={...f.armed(),status:'alarm'};
+    try{
+      f.audio.observe(f.snapshot([alarm]));
+      f.audio.gesture({pip:false});
+      assert.equal(f.voices.length,1,operation);
+      if(operation==='mute')f.audio.setEnabled(false);
+      if(operation==='hide')f.audio.setVisible(false);
+      if(operation==='disconnect')f.audio.disconnect();
+      if(operation==='clear')f.audio.observe(f.snapshot([f.armed()]));
+      if(operation==='stale'){f.advance(9999);assert.equal(f.voices[0].disconnected,false);f.advance(1);}
+      if(operation==='destroy')f.audio.destroy();
+      assert.equal(f.voices[0].disconnected,true,operation);
+      assert.equal(f.timers.size,0,operation);
+      if(operation==='hide'){f.audio.setVisible(true);assert.equal(f.voices.length,1);}
+      if(operation==='stale'){f.audio.gesture({pip:false});assert.equal(f.voices.length,1);}
+      if(operation==='mute'){f.audio.setEnabled(true);assert.equal(f.voices.length,2);}
+    }finally{f.audio.destroy();}
+  }
+});
+
+test('disarm result cues take priority over a live siren and other arming sounds',()=>{
+  const f=fixture();
+  const alarm={...f.armed('a'),status:'alarm'};
+  try{
+    f.audio.observe(f.snapshot([alarm,f.idle('b')]));
+    f.audio.gesture({pip:false});
+    f.audio.disarmOutcome({attempt:f.audio.beginDisarm(),ok:false});
+    assert.equal(f.voices[0].disconnected,true);
+    assert.deepEqual(f.voices[1].frequency.events.map(({value})=>value),[520,370]);
+    f.audio.observe(f.snapshot([alarm,f.armed('b')]));
+    assert.equal(f.voices.length,2);
+    assert.equal(f.voices[1].disconnected,false);
+    f.advance(200);
+    assert.equal(f.voices[2].type,'triangle');
+    const attempt=f.audio.beginDisarm();
+    f.accept([{...f.idle('a'),status:'alarm',activeAlarmCount:1}],'disarm');
+    f.audio.disarmOutcome({attempt,ok:true});
+    assert.deepEqual(f.voices[3].frequency.events.map(({value})=>value),[660,830,990]);
+    f.advance(300);
+    assert.equal(f.voices.length,4);
+    assert.equal(f.timers.size,0);
+  }finally{f.audio.destroy();}
 });
 
 test('simultaneous visible areas coalesce to one Armed-priority tone and long voices never overlap',()=>{
