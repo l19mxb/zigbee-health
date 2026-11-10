@@ -7,6 +7,9 @@ import './keypad.css';
 
 const count=(number,word)=>number+' '+word+(number===1?'':'s');
 const editable=area=>area.mode==='disarmed'&&!['exit_delay','entry_delay'].includes(area.status);
+const mayBypassForForce=zone=>zone.status==='active'&&zone.trouble===null;
+const mayAwaitForForce=zone=>zone.status==='unknown'&&zone.awaitingReading===true;
+const validBypassComment=comment=>typeof comment==='string'&&comment.length<=300&&!/[\u0000-\u001f\u007f]/.test(comment);
 
 function forceArmBlock(areas){
   for(const area of areas){
@@ -15,9 +18,9 @@ function forceArmBlock(areas){
     if(area.activeAlarmCount)return 'Reset alarm memory in '+area.name+' before arming.';
     if(!area.zoneCount)return 'Add an enabled zone to '+area.name+' before arming.';
     const blockers=area.blockingZones||[];
-    const fault=blockers.find(zone=>zone.status!=='active'||zone.trouble!==null);
-    if(fault)return 'Resolve trouble or wait for a fresh reading from '+fault.name+' in '+area.name+'.';
-    if(!(area.includedCount>blockers.length))return 'Keep at least one ready, protected zone in '+area.name+'.';
+    const fault=blockers.find(zone=>!mayBypassForForce(zone)&&!mayAwaitForForce(zone));
+    if(fault)return 'Resolve the issue with '+fault.name+' in '+area.name+' before using Force Arm.';
+    if(!(area.includedCount>blockers.filter(mayBypassForForce).length))return 'Keep at least one included zone in '+area.name+'.';
   }
   return '';
 }
@@ -38,41 +41,63 @@ function notReadyZones(areas){
   const zones=new Map();
   for(const area of areas){
     const cycleIds=new Set((area.cycleBypasses||[]).map(zone=>zone.id));
+    const awaitingIds=new Set((area.awaitingZones||[]).map(zone=>zone.id));
     for(const zone of Array.isArray(area.zoneIssues)?area.zoneIssues:area.blockingZones||[]){
       const previous=zones.get(zone.id),areaNames=previous?[...previous.areaNames,area.name]:[area.name];
-      const notes=[(zone.manualBypassed??(zone.bypassed&&!zone.cycleBypassed))?'Manually bypassed':null,zone.homeExcluded?'Bypassed in Home':null,zone.cycleBypassed||cycleIds.has(zone.id)?'Bypassed until disarm':null].filter(Boolean),contextNames=[...(previous?.contextNames||[]),...(notes.length?[area.name+': '+notes.join(', ')]:[])];
+      const notes=[(zone.manualBypassed??(zone.bypassed&&!zone.cycleBypassed))?'Manually bypassed':null,zone.homeExcluded?'Bypassed in Home':null,zone.cycleBypassed||cycleIds.has(zone.id)?'Bypassed until disarm':null,awaitingIds.has(zone.id)?'Included by Force Arm':null].filter(Boolean),contextNames=[...(previous?.contextNames||[]),...(notes.length?[area.name+': '+notes.join(', ')]:[])];
       zones.set(zone.id,{...zone,areaNames,contextNames,reason:zone.trouble||(zone.status==='unknown'?'Waiting for a fresh reading':zone.status==='active'?'Open / active':'Not ready')});
     }
   }
   return [...zones.values()];
 }
-const blockerSignature=areas=>JSON.stringify(areas.map(area=>({id:area.id,zones:(area.blockingZones||[]).map(zone=>({id:zone.id,status:zone.status,trouble:zone.trouble||null})).sort((a,b)=>a.id.localeCompare(b.id))})).sort((a,b)=>a.id.localeCompare(b.id)));
+const zoneConditions=zones=>zones.map(zone=>({id:zone.id,status:zone.status,trouble:zone.trouble||null})).sort((a,b)=>a.id.localeCompare(b.id));
+function reviewSignature(areas,force,preview=false){
+  const plans=areas.map(area=>{
+    const blockers=area.blockingZones||[];
+    const bypass=force&&!preview?blockers.filter(mayBypassForForce):blockers;
+    const awaiting=force?(preview?area.awaitingZones:blockers.filter(mayAwaitForForce)):[];
+    return {id:area.id,bypass:zoneConditions(bypass),awaiting:zoneConditions(awaiting),
+      protectedZoneCount:preview?area.protectedZoneCount:area.includedCount-bypass.length};
+  });
+  return JSON.stringify(plans.sort((a,b)=>a.id.localeCompare(b.id)));
+}
 const armingContext=value=>JSON.stringify({ids:(value.areas||[]).map(area=>area.id).sort(),revision:value.armingRevision||null,canArm:!!value.canArm,canBypassArm:!!value.canBypassArm,canForceArm:!!value.canForceArm,readOnly:!!value.readOnly});
 function reviewMatches(review,value){
   const areas=review.areaIds.map(id=>(value?.areas||[]).find(area=>area.id===id));
   const force=review.intent==='force';
   const permitted=force?value?.canForceArm:value?.canBypassArm;
-  if(!permitted||value.readOnly||value.armingRevision!==review.revision||!areas.every(area=>area&&editable(area)&&area.enabled&&!area.activeAlarmCount)||blockerSignature(areas)!==review.blockers)return false;
-  if(!force)return true;
-  return !forceArmBlock(areas)&&areas.every(area=>review.areas.find(item=>item.id===area.id)?.protectedZoneCount===area.includedCount-(area.blockingZones||[]).length);
+  if(!permitted||value.readOnly||value.armingRevision!==review.revision||!areas.every(area=>area&&editable(area)&&area.enabled&&!area.activeAlarmCount))return false;
+  return (!force||!forceArmBlock(areas))&&reviewSignature(areas,force)===review.signature;
 }
 function CycleBypasses({areas}){
   const active=areas.filter(area=>area.cycleBypassCount>0||(area.cycleBypasses||[]).length);
   if(!active.length)return null;
   return <section className="keypad-cycle-bypasses" aria-label="Current arming cycle bypasses">{active.map(area=>{const number=area.cycleBypassCount??area.cycleBypasses.length;return <div key={area.id}><strong>{area.name} · {number} cycle {number===1?'bypass':'bypasses'}</strong><span>{(area.cycleBypasses||[]).map(zone=>zone.name).join(', ')}</span></div>;})}<p>These zones remain excluded until their area disarms.</p></section>;
 }
+function ReviewZones({title,zones}){
+  return <><h4>{title}</h4><ul>{zones.map(zone=><li key={zone.id}><strong>{zone.name}</strong><span>{zone.trouble||(zone.status==='unknown'?'Waiting for a fresh reading':'Open / active')}</span></li>)}</ul></>;
+}
 function ArmBypassReview({review,now,busy,onClose,onConfirm}){
-  const [reason,setReason]=useState(''),[confirmed,setConfirmed]=useState(false);
+  const [comment,setComment]=useState('');
   const force=review.intent==='force';
-  const remaining=Math.max(0,Math.ceil((review.expiresAt-now)/1000)),excluded=review.areas.reduce((sum,area)=>sum+area.blockingZones.length,0);
-  const reasonReady=force||reason.trim().length>0&&!/[\u0000-\u001f\u007f]/.test(reason);
-  const ready=remaining>0&&confirmed&&reasonReady&&review.areas.every(area=>area.protectedZoneCount>0);
-  return <Modal title={force?'Force Arm Away':'Bypass and arm Away'} wide onClose={onClose}><form className="keypad-bypass-review" onSubmit={event=>{event.preventDefault();if(ready&&!busy)void onConfirm(force?undefined:reason.trim());}}>
-    <div className="notice warning"><strong>{count(excluded,force?'open zone':'zone')} will be bypassed for this arming cycle.</strong><p>Disarming each area ends its cycle bypasses. Review every listed zone before continuing.</p></div>
-    <div className="keypad-bypass-review-areas">{review.areas.map(area=><section key={area.id}><h3>{area.name}</h3><p>{count(area.protectedZoneCount,'protected zone')} will remain.</p>{area.blockingZones.length?<ul>{area.blockingZones.map(zone=><li key={zone.id}><strong>{zone.name}</strong><span>{zone.trouble||(zone.status==='unknown'?'Waiting for a fresh reading':'Open / active')}</span></li>)}</ul>:<p className="small muted">No additional zones will be excluded in this area.</p>}</section>)}</div>
+  const remaining=Math.max(0,Math.ceil((review.expiresAt-now)/1000));
+  const excluded=review.areas.some(area=>area.blockingZones.length);
+  const awaiting=force&&review.areas.some(area=>area.awaitingZones.length);
+  const ready=remaining>0&&validBypassComment(comment)&&review.areas.every(area=>area.protectedZoneCount>0);
+  return <Modal title={force?'Force Arm Away':'Bypass and arm Away'} wide onClose={onClose}><form className="keypad-bypass-review" onSubmit={event=>{event.preventDefault();if(ready&&!busy)void onConfirm(comment.trim());}}>
+    <div className={'notice'+(excluded?' warning':'')}>
+      <strong>{excluded?'The listed bypasses last until each area disarms.':'All included zones stay in this arming cycle.'}</strong>
+      {awaiting?<p>A waiting zone can raise an alarm when a fresh report shows it open or active.</p>:null}
+    </div>
+    <div className="keypad-bypass-review-areas">{review.areas.map(area=><section key={area.id}>
+      <h3>{area.name}</h3>
+      <p>{count(area.protectedZoneCount,'zone')} will stay included.</p>
+      {area.blockingZones.length?<ReviewZones title="Bypassed until disarm" zones={area.blockingZones}/>:null}
+      {force&&area.awaitingZones.length?<ReviewZones title="Awaiting a fresh reading · stays included" zones={area.awaitingZones}/>:null}
+    </section>)}</div>
     <p className="keypad-review-expiry" aria-live="off">Review expires in {Math.floor(remaining/60)}:{String(remaining%60).padStart(2,'0')}</p>
-    {!force?<Field label="Reason for cycle bypass" hint="Required. Single-line text, up to 300 characters." required maxLength={300} value={reason} disabled={busy} onChange={event=>setReason(event.target.value)}/>:null}
-    <label className="checkbox-field keypad-bypass-confirm"><input type="checkbox" required checked={confirmed} disabled={busy} onChange={event=>setConfirmed(event.target.checked)}/>These zones will not be protected until disarm</label>
+    {!force?<Field label="Comment (optional)" hint="Recorded with the arming event." maxLength={300} value={comment} disabled={busy}
+      onChange={event=>setComment(event.target.value)} onKeyDown={event=>{if(event.key==='Enter')event.preventDefault();}}/>:null}
     <div className="form-actions"><button type="button" disabled={busy} onClick={onClose}>Cancel</button><button className="primary" disabled={busy||!ready}>{busy?'Arming…':force?'Force Arm selected':'Bypass and arm selected'}</button></div>
   </form></Modal>;
 }
@@ -118,7 +143,7 @@ export default function Keypad({onSecurity,kiosk=false,requestApi=request}){
   const showBypassArm=!!state?.canBypassArm&&!armReady&&selected.length>0&&selected.every(editable);
   const mayBypassArm=available&&state.canArm&&showBypassArm&&typeof state.armingRevision==='string'&&selected.every(area=>area.enabled&&area.zoneCount>0&&!area.activeAlarmCount);
   const showForceArm=!!state?.canForceArm&&!armReady&&selected.length>0;
-  const forceBlock=showForceArm&&(forceArmBlock(selected)||(!selected.some(area=>area.blockingZones?.length)?'Force Arm needs an open zone to exclude.':''));
+  const forceBlock=showForceArm&&(forceArmBlock(selected)||(!selected.some(area=>area.blockingZones?.length)?'Force Arm needs an open zone or a zone awaiting a reading.':''));
   const mayForceArm=available&&state.canArm&&showForceArm&&typeof state.armingRevision==='string'&&!forceBlock;
   const choose=ids=>{discardReview();setSelection(ids);setCarousel(0);setCommandError('');setMessage('');};
   async function command(action,all=false){
@@ -140,26 +165,28 @@ export default function Keypad({onSecurity,kiosk=false,requestApi=request}){
       const fresh=await refresh();
       if(!fresh||epoch!==reviewEpoch.current)throw Error('Area settings changed. Review the current zones again.');
       const reviewError='The bypass review could not be verified. Review the current zones again.';
-      if(force&&result.action!==action)throw Error(reviewError);
+      if(result.action!==action)throw Error(reviewError);
       if(!preview||typeof preview.token!=='string'||!preview.token||!Number.isFinite(preview.expiresAt)||preview.expiresAt<=fresh.now||!Array.isArray(preview.areas)||preview.areas.length!==areaIds.length)throw Error(reviewError);
       const previewIds=new Set(preview.areas.map(area=>area.id));
-      if(previewIds.size!==areaIds.length||preview.areas.some(area=>!areaIds.includes(area.id)||!Array.isArray(area.blockingZones)||!Number.isInteger(area.protectedZoneCount)||area.protectedZoneCount<1))throw Error(reviewError);
-      const value={...preview,intent,areaIds,revision:fresh.armingRevision,blockers:blockerSignature(preview.areas),epoch};
+      if(previewIds.size!==areaIds.length||preview.areas.some(area=>!areaIds.includes(area.id)||!Array.isArray(area.blockingZones)
+        ||force&&!Array.isArray(area.awaitingZones)||!Number.isInteger(area.protectedZoneCount)||area.protectedZoneCount<1))throw Error(reviewError);
+      const value={...preview,intent,areaIds,revision:fresh.armingRevision,signature:reviewSignature(preview.areas,force,true),epoch};
       if(!reviewMatches(value,fresh))throw Error('Zone conditions changed. Review the current zones again.');
-      if(!preview.areas.some(area=>area.blockingZones.length)){setMessage('The selected areas are ready. Use Arm away.');return;}
+      if(!preview.areas.some(area=>area.blockingZones.length||force&&area.awaitingZones.length)){setMessage('The selected areas are ready. Use Arm away.');return;}
       reviewRef.current=value;setArmReview(value);setDialog('bypass-arm');
     }catch(error){discardReview();setCommandError(error.message);if(kiosk&&error.status===403){setState(null);await refresh();}}
     finally{reviewFlight.current=false;setBusy(false);}
   }
-  async function confirmBypass(reason){
+  async function confirmBypass(comment){
     const review=reviewRef.current;
     if(reviewFlight.current||!available)return;
     const force=review?.intent==='force';
-    const validReason=force||typeof reason==='string'&&reason.trim().length>0&&reason.trim().length<=300&&!/[\u0000-\u001f\u007f]/.test(reason);
-    if(!review||review.epoch!==reviewEpoch.current||now>=review.expiresAt||!reviewMatches(review,latestState.current)||!validReason){discardReview();setCommandError('Bypass review is no longer current. Review the zones again before arming.');return;}
-    const body={action:force?'force_arm_away':'arm_away',areaIds:[...review.areaIds],bypass:{token:review.token,...(force?{}:{reason:reason.trim()})}};
+    if(!review||review.epoch!==reviewEpoch.current||now>=review.expiresAt||!reviewMatches(review,latestState.current)||!validBypassComment(comment)){discardReview();setCommandError('Bypass review is no longer current. Review the zones again before arming.');return;}
+    const reason=force?'':comment.trim();
+    const body={action:force?'force_arm_away':'arm_away',areaIds:[...review.areaIds],bypass:{token:review.token,...(reason?{reason}:{})}};
+    const hadBypasses=review.areas.some(area=>area.blockingZones.length);
     reviewFlight.current=true;setBusy(true);discardReview();setCommandError('');setMessage('Applying the reviewed arm command…');
-    try{const result=await requestApi(kiosk?'kiosk/command':'keypad/command',body);pending.current?.abort();feedback('accepted',result);setMessage('Away arming accepted for '+count(result.areaIds?.length||0,'area')+'. Cycle bypasses end when each area disarms.');await refresh();}
+    try{const result=await requestApi(kiosk?'kiosk/command':'keypad/command',body);pending.current?.abort();feedback('accepted',result);setMessage('Away arming accepted for '+count(result.areaIds?.length||0,'area')+'.'+(hadBypasses?' Cycle bypasses end when each area disarms.':''));await refresh();}
     catch(error){discardReview();setMessage('');setCommandError(error.message+' Review the zones again before arming.');if(kiosk&&error.status===403){setState(null);await refresh();}}
     finally{reviewFlight.current=false;setBusy(false);}
   }
@@ -179,7 +206,7 @@ export default function Keypad({onSecurity,kiosk=false,requestApi=request}){
           <div className="keypad-command-buttons">
             <button className="primary" disabled={!mayArm} title={!state.canArm?'Security control access is required':!armReady?'Select only disarmed, ready areas to arm':undefined} onClick={()=>void command('arm_away')}>Arm away</button>
             {showBypassArm||showForceArm?<div className="keypad-arm-options">
-              {showForceArm?<button className="keypad-force-arm" disabled={!mayForceArm} aria-describedby={forceBlock?'keypad-force-block':undefined} title="Review open zones before Force Arm" onClick={()=>void prepareBypass('force')}>Force Arm</button>:null}
+              {showForceArm?<button className="keypad-force-arm" disabled={!mayForceArm} aria-describedby={forceBlock?'keypad-force-block':undefined} title="Review open and waiting zones before Force Arm" onClick={()=>void prepareBypass('force')}>Force Arm</button>:null}
               {showBypassArm?<button className="keypad-bypass-arm" disabled={!mayBypassArm} title="Review exact cycle exclusions before arming" onClick={()=>void prepareBypass('bypass')}>Bypass and arm…</button>:null}
               {forceBlock?<p id="keypad-force-block" className="keypad-force-block">{forceBlock}</p>:null}
             </div>:null}

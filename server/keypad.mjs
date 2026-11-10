@@ -5,6 +5,7 @@ const OPTIONS={N:32768,r:8,p:1,maxmem:64*1024*1024};
 const PREPARE_ACTIONS=new Map([['prepare_arm_away','arm_away'],['prepare_force_arm_away','force_arm_away']]);
 const COMMAND_ACTIONS=new Set(['arm_away','force_arm_away','disarm',...PREPARE_ACTIONS.keys()]);
 const FORCE_ARM_REASON='Force Arm: bypass known open zones';
+const DEFAULT_BYPASS_REASON='Bypass and arm: reviewed blocking zones';
 const allowed=(condition,message,statusCode=400)=>{if(!condition)throw new KeypadError(message,statusCode);};
 const keys=(input,names)=>{allowed(input&&typeof input==='object'&&!Array.isArray(input),'Provide keypad fields');allowed(Object.keys(input).every(name=>names.includes(name)),'Unknown keypad field');return input;};
 
@@ -67,29 +68,29 @@ export class Keypad{
     const readingTimeoutMin=this.security.readingTimeoutMin();
     const areas=[...areaIds].sort().map(id=>{
       const area=this.security.requireArea(id),ready=this.security.readiness(area,'away',readingTimeoutMin);allowed(area.enabled,'This security area is disabled');allowed(area.mode==='disarmed'&&!area.targetMode,'Disarm '+area.name+' before arming it again');allowed(!ready.activeAlarmCount,'Reset alarm memory before arming this area');allowed(ready.zoneCount>0,'Add an enabled zone before arming this area');
-      if(action==='force_arm_away')this.security.requireOpenBlockers(area,ready);
-      const protectedZoneCount=ready.includedCount-ready.blockingZones.length;allowed(protectedZoneCount>0,'At least one included, ready zone must remain protected in '+area.name);
-      return {id:area.id,name:area.name,blockingZones:ready.blockingZones.map(({id,name,status,trouble})=>({id,name,status,trouble})),protectedZoneCount};
+      const {bypassZones,awaitingZones}=action==='force_arm_away'?this.security.forceArmBlockers(area,ready):{bypassZones:ready.blockingZones,awaitingZones:[]};
+      const protectedZoneCount=ready.includedCount-bypassZones.length;allowed(protectedZoneCount>0,'At least one included, ready or awaiting zone must remain protected in '+area.name);
+      return {id:area.id,name:area.name,blockingZones:bypassZones.map(({id,name,status,trouble})=>({id,name,status,trouble})),awaitingZones,protectedZoneCount};
     });
-    const config=this.armingConfig(areaIds,readingTimeoutMin),conditions=config.zones.map(zone=>({id:zone.id,areas:zone.areaIds.filter(id=>areaIds.includes(id)).map(id=>{const view=this.security.zoneView(zone,this.security.requireArea(id),'away',readingTimeoutMin);return {id,known:view.known,active:view.active,status:view.status,trouble:view.trouble};})}));
+    const config=this.armingConfig(areaIds,readingTimeoutMin),conditions=config.zones.map(zone=>({id:zone.id,areas:zone.areaIds.filter(id=>areaIds.includes(id)).map(id=>{const view=this.security.zoneView(zone,this.security.requireArea(id),'away',readingTimeoutMin);return {id,known:view.known,active:view.active,status:view.status,trouble:view.trouble,awaitingReading:view.awaitingReading};})}));
     return {areas,signature:this.mac('arming-plan\0'+JSON.stringify({action,config,conditions}))};
   }
   prepareBypass(areaIds,binding,prepareAction='prepare_arm_away'){
-    const action=PREPARE_ACTIONS.get(prepareAction),plan=this.bypassPlan(areaIds,action);allowed(plan.areas.some(area=>area.blockingZones.length),'These areas are ready; use Arm away');
+    const action=PREPARE_ACTIONS.get(prepareAction),plan=this.bypassPlan(areaIds,action);allowed(plan.areas.some(area=>area.blockingZones.length||area.awaitingZones.length),'These areas are ready; use Arm away');
     for(const [token,value] of this.armPreviews)if(value.expiresAt<=this.now()||value.binding===binding)this.armPreviews.delete(token);allowed(this.armPreviews.size<256,'Too many arming previews. Try again later.',429);
     const token=crypto.randomBytes(32).toString('hex'),expiresAt=this.now()+120000;this.armPreviews.set(token,{action,binding,areaIds:[...areaIds].sort(),signature:plan.signature,expiresAt});return {ok:true,action:prepareAction,preview:{token,expiresAt,areas:plan.areas}};
   }
   confirmBypass(areaIds,bypass,binding,actor,checkCaller,action='arm_away'){
     const openOnly=action==='force_arm_away';
-    allowed(!openOnly||bypass!==undefined,'Review the open zones before Force Arm');
+    allowed(!openOnly||bypass!==undefined,'Review the open zones and zones awaiting readings before Force Arm');
     const body=keys(bypass,openOnly?['token']:['token','reason']);allowed(typeof body.token==='string'&&/^[a-f0-9]{64}$/.test(body.token),'Review the bypass list again');
     const preview=this.armPreviews.get(body.token);allowed(preview&&preview.binding===binding,'Arming preview expired or changed; review the bypass list again');this.armPreviews.delete(body.token);
     allowed(preview.action===action&&preview.expiresAt>this.now()&&JSON.stringify(preview.areaIds)===JSON.stringify([...areaIds].sort()),'Arming preview expired or changed; review the bypass list again');
-    if(!openOnly)allowed(typeof body.reason==='string'&&body.reason.trim().length>0&&body.reason.trim().length<=300&&!/[\u0000-\u001f\u007f]/.test(body.reason),'Enter a bypass reason (1–300 characters)');
-    const reason=openOnly?FORCE_ARM_REASON:body.reason.trim();
+    if(!openOnly&&body.reason!==undefined)allowed(typeof body.reason==='string'&&body.reason.trim().length<=300&&!/[\u0000-\u001f\u007f]/.test(body.reason),'Bypass reason must be a single line of up to 300 characters');
+    const reason=openOnly?FORCE_ARM_REASON:body.reason?.trim()||DEFAULT_BYPASS_REASON;
     const results=this.s.transaction(()=>{
       checkCaller();const plan=this.bypassPlan(areaIds,action);allowed(plan.signature===preview.signature,'Conditions changed; review the bypass list again');
-      return plan.areas.map(area=>this.security.armWithCycleBypass(area.id,area.blockingZones.map(zone=>zone.id),reason,actor,{openOnly}));
+      return plan.areas.map(area=>this.security.armWithCycleBypass(area.id,area.blockingZones.map(zone=>zone.id),reason,actor,{openOnly,awaitingZoneIds:area.awaitingZones.map(zone=>zone.id)}));
     });return {ok:true,action,areaIds:results.map(area=>area.id),areas:results};
   }
   checkThrottle(scope){

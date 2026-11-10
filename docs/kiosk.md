@@ -11,10 +11,11 @@ output settings still apply. Sound does not replay old events after reconnection
 
 **Arm away** does not require a PIN. Existing zone readiness checks still apply.
 An administrator can separately enable **Allow bypass and arm**, which starts
-off. This enables **Force Arm**, which reviews open zones and asks for
-confirmation. Offline, unknown or faulty zones still block Force Arm. The
-separate **Bypass and arm** flow requires a confirmation and a reason. Each
-selected area must retain at least one protected zone. The bypass lasts until that area is
+off. This enables **Force Arm**, which reviews open zones to bypass and keeps
+zones waiting for a fresh report protected. A fresh active report can raise
+an alarm after arming. Offline or faulty zones still block Force Arm. The
+separate **Bypass and arm** flow has an optional reason and one confirmation.
+Each selected area must retain at least one protected zone. The bypass lasts until that area is
 disarmed and does not bypass a shared detector in other areas. The kiosk keeps
 the bypassed zone names visible, including after their sensors return to normal.
 Disarming requires a personal four-digit PIN belonging to an enabled user with

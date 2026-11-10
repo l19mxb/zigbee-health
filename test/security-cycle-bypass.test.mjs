@@ -48,24 +48,26 @@ test('Force Arm previews known open zones and applies only per-area cycle bypass
 });
 
 test('Force Arm rejects mixed open and trouble blockers including an active status carrying trouble',()=>{
-  for(const condition of ['offline','unknown','active-with-trouble']){
+  for(const condition of ['offline','wrong-type','broker-offline','active-with-trouble']){
     const f=fixture();try{
       f.report('shared',true);
       if(condition==='offline')f.s.saveDevice({...f.s.device('inside-a'),availability:'offline'});
-      if(condition==='unknown')f.security.readings.delete('inside-a');
+      if(condition==='wrong-type')f.security.ingest('inside-a',{contact:'not a contact state'});
+      if(condition==='broker-offline')f.s.saveNetwork({...f.s.network('cycle-network'),connected:false});
       if(condition==='active-with-trouble'){
         f.report('inside-a',true);const view=f.security.zoneView.bind(f.security);
         f.security.zoneView=(zone,...args)=>{const value=view(zone,...args);return zone.id===f.zones[1].id?{...value,trouble:'Synthetic active detector trouble'}:value;};
       }
       const before=rows(f);assert.throws(()=>prepareForce(f),/only bypasses known open zones/);
       assert.deepEqual(rows(f),before);assert.equal(f.keypad.armPreviews.size,0);
+      if(condition==='broker-offline')continue;
       const manual=f.prepare();assert.equal(manual.preview.areas[0].blockingZones.length,2);
       assert.equal(f.confirm(manual).action,'arm_away');assert.equal(f.security.area(f.a.id).cycleBypass.zoneIds.length,2);
     }finally{f.close();}
   }
 });
 
-test('Force Arm requires at least one open blocker and one protected zone in each selected area',()=>{
+test('Force Arm requires a condition to review and at least one protected zone in each selected area',()=>{
   const f=fixture();try{
     assert.throws(()=>prepareForce(f,[f.a.id,f.b.id]),/use Arm away/);
     for(const id of ['shared','inside-a','extra-a'])f.report(id,true);
@@ -88,11 +90,11 @@ test('Force Arm requires its own preview token and rejects a caller-supplied aud
   }finally{f.close();}
 });
 
-test('Force Arm rechecks trouble at confirmation and again when applying the cycle bypass',()=>{
+test('Force Arm rechecks blocker classification and source availability at confirmation',()=>{
   const f=fixture();try{
     f.report('shared',true);let prepared=prepareForce(f);
     f.security.readings.delete('shared');const before=rows(f);
-    assert.throws(()=>confirmForce(f,prepared),/only bypasses known open zones/);
+    assert.throws(()=>confirmForce(f,prepared),/Conditions changed/);
     assert.deepEqual(rows(f),before);assert.equal(f.keypad.armPreviews.has(prepared.preview.token),false);
     f.report('shared',true);prepared=prepareForce(f);
     const arm=f.security.armWithCycleBypass.bind(f.security);
@@ -101,6 +103,119 @@ test('Force Arm rechecks trouble at confirmation and again when applying the cyc
     assert.deepEqual(rows(f),before);assert.equal(f.s.device('shared').availability,'online');
     assert.equal(f.keypad.armPreviews.has(prepared.preview.token),false);
   }finally{f.close();}
+});
+
+test('Force Arm keeps stale shared detectors protected across restart and consumes only a fresh valid report',()=>{
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'zigbee-force-await-'));
+  let f;
+  try{
+    f=fixture(path.join(directory,'health.db'));
+    f.security.saveSettings({readingTimeoutMin:1,expectedReadingTimeoutMin:10080},'Fixture');
+    f.report('shared',true);
+    f.advance(60001);
+    f.report('inside-a',true);f.report('inside-b',false);f.report('extra-a',false);
+    const areaIds=[f.a.id,f.b.id],prepared=prepareForce(f,areaIds);
+    const house=prepared.preview.areas.find(area=>area.id===f.a.id),garage=prepared.preview.areas.find(area=>area.id===f.b.id);
+    assert.deepEqual(house.blockingZones.map(zone=>zone.id),[f.zones[1].id]);
+    assert.deepEqual(garage.blockingZones,[]);
+    for(const area of [house,garage])assert.deepEqual(area.awaitingZones.map(zone=>zone.id),[f.zones[0].id]);
+    assert.equal(house.protectedZoneCount,2);
+    confirmForce(f,prepared,areaIds);
+    const reviewedAt=f.keypad.now();
+    for(const id of areaIds)assert.deepEqual(f.security.area(id).cycleAwaiting.zoneIds,[f.zones[0].id]);
+    f.reopen();
+    assert.equal(f.security.activeIncidents().length,0);
+    for(const id of areaIds)assert.equal(f.security.areaView(f.security.area(id)).awaitingZoneCount,1);
+    f.security.ingest('shared',{contact:'invalid'});
+    f.security.ingest('shared',{contact:false},{retain:true});
+    f.security.ingest('shared',{contact:false,last_seen:reviewedAt-1});
+    assert.equal(f.security.activeIncidents().length,0);
+    for(const id of areaIds)assert.deepEqual(f.security.area(id).cycleAwaiting.zoneIds,[f.zones[0].id]);
+    const stored=rows(f),readings=structuredClone(f.security.readings),edges=structuredClone(f.security.edges);
+    const run=f.s.run.bind(f.s);
+    f.s.run=(sql,...args)=>{
+      if(sql.startsWith('INSERT INTO security_readings'))throw Error('Fixture reading write failed');
+      return run(sql,...args);
+    };
+    assert.throws(()=>f.report('shared',true),/Fixture reading write failed/);
+    f.s.run=run;
+    assert.deepEqual(rows(f),stored);
+    assert.deepEqual(f.security.readings,readings);
+    assert.deepEqual(f.security.edges,edges);
+    f.report('shared',true);
+    assert.deepEqual(f.security.activeIncidents().map(incident=>incident.areaId).sort(),areaIds.toSorted());
+    for(const id of areaIds)assert.equal(Object.hasOwn(f.security.area(id),'cycleAwaiting'),false);
+    f.report('shared',true);
+    assert.equal(f.security.activeIncidents().length,2);
+  }finally{
+    f?.close();
+    const resolved=fs.realpathSync(directory);
+    assert.equal(path.dirname(resolved),fs.realpathSync(os.tmpdir()));
+    assert.ok(path.basename(resolved).startsWith('zigbee-force-await-'));
+    fs.rmSync(resolved,{recursive:true,force:true});
+  }
+});
+
+test('Force Arm defers a reviewed awaiting activation until exit ends and keeps the entry rule',()=>{
+  for(const outcome of ['instant','entry','cleared','unreported','offline','invalid','other-open']){
+    const f=fixture();
+    try{
+      f.security.saveArea({id:f.a.id,exitDelaySec:4,entryDelaySec:5},'Fixture');
+      if(outcome==='entry')f.security.saveZone({id:f.zones[0].id,type:'entry'},'Fixture');
+      f.security.readings.delete('shared');
+      const preview=prepareForce(f);
+      assert.deepEqual(preview.preview.areas[0].blockingZones,[]);
+      assert.deepEqual(preview.preview.areas[0].awaitingZones.map(zone=>zone.id),[f.zones[0].id]);
+      confirmForce(f,preview);
+      f.advance(1000);
+      if(['instant','entry','cleared'].includes(outcome))f.report('shared',true);
+      if(outcome==='cleared')f.report('shared',false);
+      if(outcome==='offline')f.s.saveDevice({...f.s.device('shared'),availability:'offline'});
+      if(outcome==='invalid')f.security.ingest('shared',{contact:'invalid'});
+      if(outcome==='other-open')f.report('inside-a',true);
+      assert.equal(f.security.activeIncidents().length,0,outcome);
+      f.advance(4000);
+      const exitFinishedAt=f.keypad.now();
+      f.security.tick();
+      const area=f.security.area(f.a.id);
+      if(['offline','invalid','other-open'].includes(outcome)){
+        assert.equal(area.mode,'disarmed',outcome);
+        assert.equal(Object.hasOwn(area,'cycleAwaiting'),false,outcome);
+        assert.equal(f.security.activeIncidents().length,0,outcome);
+        continue;
+      }
+      assert.equal(area.mode,'away',outcome);
+      assert.equal(Object.hasOwn(area,'cycleAwaiting'),outcome==='unreported',outcome);
+      if(outcome==='entry'){
+        assert.equal(area.entryAt,exitFinishedAt+5000);
+        assert.equal(f.security.activeIncidents().length,0);
+        f.advance(5000);f.security.tick();
+      }
+      assert.equal(f.security.activeIncidents().length,['instant','entry'].includes(outcome)?1:0,outcome);
+      if(outcome==='unreported'){
+        f.report('shared',false);
+        assert.equal(Object.hasOwn(f.security.area(f.a.id),'cycleAwaiting'),false);
+        f.report('shared',true);
+        assert.equal(f.security.activeIncidents().length,1);
+      }
+    }finally{f.close();}
+  }
+});
+
+test('reviewed bypass arming accepts omitted or blank comments and records the authenticated actor',()=>{
+  for(const comment of [undefined,'   ']){
+    const f=fixture();
+    try{
+      f.report('shared',true);
+      const prepared=f.prepare();
+      const bypass={token:prepared.preview.token,...(comment===undefined?{}:{reason:comment})};
+      const result=f.keypad.command(f.admin,{action:'arm_away',areaIds:[f.a.id],bypass});
+      assert.equal(result.areas[0].mode,'away');
+      const audit=f.security.state().events.find(event=>event.type==='cycle_bypass_armed');
+      assert.equal(audit.actor,f.admin.username);
+      assert.match(audit.message,/Reason: Bypass and arm: reviewed blocking zones$/);
+    }finally{f.close();}
+  }
 });
 
 test('Force Arm keeps signed-in control grants and the kiosk opt-in and selected-area scope',()=>{
@@ -112,16 +227,20 @@ test('Force Arm keeps signed-in control grants and the kiosk opt-in and selected
     assert.throws(()=>f.kiosk.command({action:'prepare_force_arm_away',all:true}),error=>error.statusCode===403);
     f.enable({allAreas:false,areaIds:[f.a.id]});assert.equal(f.kiosk.state().canForceArm,true);
     assert.throws(()=>f.kiosk.command({action:'prepare_force_arm_away',areaIds:[f.a.id,f.b.id]}),error=>error.statusCode===403);
+    f.security.readings.delete('inside-a');
+    assert.equal(f.kiosk.state().areas[0].blockingZones.find(zone=>zone.id===f.zones[1].id).awaitingReading,true);
     const prepared=f.kiosk.command({action:'prepare_force_arm_away',all:true});assert.equal(prepared.action,'prepare_force_arm_away');
+    assert.deepEqual(prepared.preview.areas[0].awaitingZones.map(zone=>zone.id),[f.zones[1].id]);
     const result=f.kiosk.command({action:'force_arm_away',all:true,bypass:{token:prepared.preview.token}});
     assert.equal(result.action,'force_arm_away');assert.deepEqual(result.areaIds,[f.a.id]);assert.equal(f.security.area(f.b.id).mode,'disarmed');
     assert.equal(result.areas[0].cycleBypassCount,1);assert.equal(Object.hasOwn(result.areas[0],'cycleBypass'),false);
+    assert.equal(result.areas[0].awaitingZoneCount,1);assert.equal(Object.hasOwn(result.areas[0],'cycleAwaiting'),false);
     assert.equal(f.security.state().events.find(event=>event.type==='cycle_bypass_armed').actor,'Local kiosk');
   }finally{f.close();}
 });
 
 test('bypass preview is opaque, read-only, caller-bound and lists exact blockers with remaining protection',()=>{
-  const f=fixture();try{f.report('shared',true);const before=rows(f),changes=f.s.one('SELECT total_changes() n').n,schema=f.s.all('SELECT * FROM sqlite_master ORDER BY name'),users=f.s.all('SELECT * FROM users');f.s.db.exec('PRAGMA query_only=ON');const result=f.prepare();assert.equal(result.action,'prepare_arm_away');assert.match(result.preview.token,/^[a-f0-9]{64}$/);assert.equal(result.preview.expiresAt,f.keypad.now()+120000);assert.deepEqual(result.preview.areas,[{id:f.a.id,name:'House',blockingZones:[{id:f.zones[0].id,name:'Zone shared',status:'active',trouble:null}],protectedZoneCount:2}]);for(const secret of [f.admin.id,f.admin.username,'cycle-network','deviceId','authVersion','cycleBypass','password'])assert.equal(JSON.stringify(result).includes(secret),false,secret);assert.deepEqual(rows(f),before);assert.deepEqual(f.s.all('SELECT * FROM sqlite_master ORDER BY name'),schema);assert.deepEqual(f.s.all('SELECT * FROM users'),users);assert.equal(f.s.one('SELECT total_changes() n').n,changes);}finally{f.close();}
+  const f=fixture();try{f.report('shared',true);const before=rows(f),changes=f.s.one('SELECT total_changes() n').n,schema=f.s.all('SELECT * FROM sqlite_master ORDER BY name'),users=f.s.all('SELECT * FROM users');f.s.db.exec('PRAGMA query_only=ON');const result=f.prepare();assert.equal(result.action,'prepare_arm_away');assert.match(result.preview.token,/^[a-f0-9]{64}$/);assert.equal(result.preview.expiresAt,f.keypad.now()+120000);assert.deepEqual(result.preview.areas,[{id:f.a.id,name:'House',blockingZones:[{id:f.zones[0].id,name:'Zone shared',status:'active',trouble:null}],awaitingZones:[],protectedZoneCount:2}]);for(const secret of [f.admin.id,f.admin.username,'cycle-network','deviceId','authVersion','cycleBypass','password'])assert.equal(JSON.stringify(result).includes(secret),false,secret);assert.deepEqual(rows(f),before);assert.deepEqual(f.s.all('SELECT * FROM sqlite_master ORDER BY name'),schema);assert.deepEqual(f.s.all('SELECT * FROM users'),users);assert.equal(f.s.one('SELECT total_changes() n').n,changes);}finally{f.close();}
 });
 
 test('confirmed cycle bypass protects shared zones in other armed areas and leaves global bypass and edge state untouched',()=>{
@@ -158,7 +277,7 @@ test('fresh blocker, configuration, schedule and cycle changes invalidate a one-
 
 test('expired, mismatched-area and invalid-reason previews are consumed while another caller cannot use them',()=>{
   const f=fixture();try{f.report('shared',true);let preview=f.prepare();assert.throws(()=>f.confirm(preview,[f.a.id],f.operator),/expired or changed/);assert.equal(f.keypad.armPreviews.has(preview.preview.token),true);f.advance(120000);assert.throws(()=>f.confirm(preview),/expired or changed/);assert.equal(f.keypad.armPreviews.has(preview.preview.token),false);
-    preview=f.prepare();assert.throws(()=>f.confirm(preview,[f.a.id,f.b.id]),/expired or changed/);assert.equal(f.keypad.armPreviews.has(preview.preview.token),false);preview=f.prepare();assert.throws(()=>f.keypad.command(f.admin,{action:'arm_away',areaIds:[f.a.id],bypass:{token:preview.preview.token,reason:''}}),/reason/);assert.throws(()=>f.confirm(preview),/expired or changed/);
+    preview=f.prepare();assert.throws(()=>f.confirm(preview,[f.a.id,f.b.id]),/expired or changed/);assert.equal(f.keypad.armPreviews.has(preview.preview.token),false);preview=f.prepare();assert.throws(()=>f.keypad.command(f.admin,{action:'arm_away',areaIds:[f.a.id],bypass:{token:preview.preview.token,reason:'line\nbreak'}}),/reason/);assert.throws(()=>f.confirm(preview),/expired or changed/);
   }finally{f.close();}
 });
 

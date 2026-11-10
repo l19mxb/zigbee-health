@@ -233,15 +233,18 @@ does not need a PIN. Existing readiness checks apply. The keypad shows blocking
 zones and never silently bypasses them. A multi-area command either succeeds
 for the complete selection or leaves it unchanged.
 
-**Force Arm** reviews the currently open zones in the selected areas and arms
-Away after confirmation. Offline, unknown or faulty zones that would otherwise
-block arming still block Force Arm. Each selected area must keep at least one
-enabled, ready zone under protection. The Security history records the action
-and the bypassed zones.
+**Force Arm** reviews the selected areas and arms Away after confirmation.
+Currently open or active zones are bypassed until disarm. Zones waiting for a
+fresh report stay in the armed area. If the first fresh report is active, the
+zone follows its configured Entry or Instant rule. If that report arrives
+during the exit delay and the zone is still active when the delay ends, the
+rule runs after the area arms. Offline devices, unavailable brokers and
+invalid sensor readings still block Force Arm. Each selected area must keep
+at least one enabled zone under protection.
 
 If selected areas have open, unknown or unavailable zones, **Bypass and arm**
-opens a review of the exact zones to be left unprotected in each area. Enter a
-reason and confirm the warning before arming. Each area must retain at least
+opens a review of the exact zones to be left unprotected in each area. Confirm
+the review to arm. A reason is optional. Each area must retain at least
 one enabled, protected zone. Disabled areas, areas without zones and unresolved
 alarm memory cannot be bypassed through this flow. The confirmation expires
 after two minutes; changed conditions or access require a fresh review.
