@@ -183,7 +183,7 @@ function SecuritySettings({timeout,canChange,manage,busy,disconnected,onSave}){
     <PanelHeading title="Security settings"/>
     <div className="security-settings-content">
       <h3>Zone reading timeout</h3>
-      <p id="security-timeout-help">This applies to every security zone. When the last report for a zone’s activation property exceeds the timeout, the zone becomes unknown and blocks standard arming until it receives a fresh reading.</p>
+      <p id="security-timeout-help">When a stateful zone’s reading exceeds this timeout, the zone becomes unknown. An unknown Entry or Instant zone can block standard arming until a fresh reading arrives.</p>
       {available?<dl className="security-timeout-current">
         <dt>Current timeout</dt>
         <dd>{timeoutDuration(timeout)}{timeout>=60?<span className="muted"> ({timeout.toLocaleString()} minutes)</span>:null}</dd>
@@ -205,13 +205,15 @@ function SecuritySettings({timeout,canChange,manage,busy,disconnected,onSave}){
 }
 
 function AreaPanel({area,zones,incidents,now,control,manage,removeAllowed,onCommand,onEdit,onRemove,onZones}){
-  const memory=area.activeAlarmCount>0,alarm=area.status==='alarm',waiting=['entry_delay','exit_delay'].includes(area.status);
+  const memory=area.activeAlarmCount>0,alarm=area.status==='alarm';
+  const delayEndsAt=area.entryAt??area.exitAt,waiting=delayEndsAt!=null;
+  const delayLabel=area.entryAt!=null?'Entry delay':'Exit delay';
   const enabledZones=zones.filter(zone=>zone.enabled);
   const alwaysActiveCount=area.alwaysActiveZoneCount??enabledZones.filter(zone=>zone.type==='24hour').length;
   const armingCount=(area.zoneCount??enabledZones.length)-alwaysActiveCount;
   const armingReady=area.readyCount??enabledZones.filter(zone=>zone.type!=='24hour'&&zone.known&&!zone.active&&!zone.trouble&&!zone.bypassed).length;
   const disarmed24HourAlarm=area.mode==='disarmed'&&area.active24HourAlarmCount>0;
-  const countdown=Math.max(0,Math.ceil((((area.status==='entry_delay'?area.entryAt:area.exitAt)||now)-now)/1000));
+  const countdown=Math.max(0,Math.ceil(((delayEndsAt??now)-now)/1000));
   const attentionCount=(area.blockingZones||[]).length||area.troubleCount||1;
   let alarmDetail='Alarm memory latched';
   if(disarmed24HourAlarm&&area.unacknowledged24HourAlarmCount>0){
@@ -222,7 +224,7 @@ function AreaPanel({area,zones,incidents,now,control,manage,removeAllowed,onComm
   return <section className={'security-area-panel security-tone-'+tone} aria-label={area.name+' security panel'}>
     <div className="security-area-panel-heading"><h2>{area.name}</h2>{manage?<div className="security-area-tools"><button className="icon-button" aria-label={'Edit area '+area.name} title={canConfigure(area)?'Edit area':'Disarm this area before editing'} disabled={!canConfigure(area)} onClick={onEdit}><Icon name="settings" size={17}/></button><button className="icon-button" aria-label={'Remove area '+area.name} title={removeAllowed?'Remove area':'Disarm all linked areas and reset shared-zone alarm memory before removing this area'} disabled={!removeAllowed} onClick={onRemove}><Icon name="close" size={16}/></button></div>:null}</div>
     <div className="security-area-main"><div className="security-area-controls">
-      <div className="security-status-display" aria-live="polite"><Shield alert={alarm||memory}/><div><strong>{areaStatus(area)}</strong><p>{subtitle}</p>{waiting?<b className="security-countdown" role="timer" aria-live="off">{Math.floor(countdown/60)}:{String(Math.floor(countdown%60)).padStart(2,'0')}</b>:null}</div></div>
+      <div className="security-status-display" aria-live="polite"><Shield alert={alarm||memory}/><div><strong>{areaStatus(area)}</strong><p>{subtitle}</p>{waiting?<b className="security-countdown" role="timer" aria-label={delayLabel} aria-live="off">{alarm?delayLabel+' · ':null}{Math.floor(countdown/60)}:{String(Math.floor(countdown%60)).padStart(2,'0')}</b>:null}</div></div>
       <div className="security-mode-buttons"><button className={area.mode==='disarmed'&&!waiting?'current-mode':''} disabled={!control||area.mode==='disarmed'&&!waiting} onClick={()=>onCommand('disarm',area)}>Disarm</button><button className="primary" disabled={!control||!canConfigure(area)||!area.enabled} onClick={()=>onCommand('arm_home',area)}>Arm Home</button><button className="primary" disabled={!control||!canConfigure(area)||!area.enabled} onClick={()=>onCommand('arm_away',area)}>Arm Away</button></div>
       <p className="security-zone-count"><strong>{plural(armingCount,alwaysActiveCount?'arming zone':'zone')}</strong>{armingCount||!alwaysActiveCount?<><span>·</span>{area.ready?'All ready':armingReady+' ready'}</>:null}{alwaysActiveCount>0?<><span>·</span>{plural(alwaysActiveCount,'24-hour zone')}</>:null}</p>
       <p className="security-delays">Entry delay {area.entryDelaySec}s · Exit delay {area.exitDelaySec}s{area.bypassedCount?' · '+plural(area.bypassedCount,'bypass'):''}</p>

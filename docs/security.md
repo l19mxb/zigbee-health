@@ -39,10 +39,11 @@ For a Zigbee2MQTT button, choose **Custom condition**. Set **Activation property
 to `action`, **Condition** to **Equals**, and **Value type** to **Text**. Enter
 the value the button sends for the press you want to monitor, such as `single`.
 See the [Zigbee2MQTT emergency-button example](https://www.zigbee2mqtt.io/devices/HS1EB_HS1EB-E.html).
-Each matching live press creates an alarm and the button can be reset without a
-release report. A stateful zone such as a contact uses a fresh change from normal
-to active. Choose **Silent on keypad** for a zone that should still log alarms
-and run its alerts without sounding the keypad siren.
+Each matching live press creates an alarm that can be reset without a release
+report. A stateful zone such as a contact uses a fresh change from normal to
+active. Choose **Silent on keypad** for a zone that should still log alarms and
+run its alerts without sounding the keypad siren. Reset clears alarm memory
+while leaving any queued 24-hour alert eligible for delivery.
 
 ## Shared zones
 

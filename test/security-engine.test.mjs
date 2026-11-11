@@ -92,9 +92,12 @@ test('24-hour action buttons accept repeated presses, suppress duplicate samples
     f.report('motion',{action:'single'});
     assert.equal(f.e.activeIncidents().length,9);
     f.s.saveDevice({...f.s.device('motion'),availability:'online'});f.normal();
+    const queued=f.e.queuedActions().find(job=>job.context.areaId===f.area.id);
+    assert.ok(queued);
     f.e.command(f.area.id,'acknowledge',{},'operator');
     f.e.command(f.area.id,'reset',{},'operator');
     assert.equal(f.e.activeIncidents(f.area.id).length,0);
+    assert.equal(f.e.claimAction(queued.id)?.status,'delivering');
     f.report('motion',{action:'single'});
     assert.equal(f.e.activeIncidents(f.area.id).length,1);
     assert.equal(f.e.activeIncidents(annex.id).length,4);
@@ -127,9 +130,10 @@ test('24-hour rules cannot be bypassed and do not determine ordinary arming read
   }finally{f.close();}
 });
 
-test('a 24-hour activation interrupts both exit and entry delays immediately',()=>{
+test('24-hour alarms cancel exit arming and preserve the independent ordinary entry deadline',()=>{
   const f=fixture({exitDelaySec:5,entryDelaySec:20});try{
-    const zone=f.e.saveZone({id:f.motion.id,type:'24hour',property:'action',value:'single'});
+    const zone=f.e.saveZone({id:f.motion.id,type:'24hour',property:'action',value:'single',silent:true});
+    f.action();
     f.normal();f.arm();assert.equal(f.e.requireArea(f.area.id).targetMode,'away');
     f.report('motion',{action:'single'});
     let area=f.e.requireArea(f.area.id);
@@ -138,10 +142,34 @@ test('a 24-hour activation interrupts both exit and entry delays immediately',()
     assert.equal(f.e.state().events.filter(event=>event.type==='arm_blocked').length,1);
     f.e.command(area.id,'acknowledge',{},'operator');f.e.command(area.id,'reset',{},'operator');
     f.arm();f.advance(5000);f.e.tick();
-    f.report('door',{contact:false});assert.ok(f.e.requireArea(area.id).entryAt);
+    f.report('motion',{action:'single'});
+    const enteredAt=f.now(),deadline=enteredAt+20000;
+    f.report('door',{contact:false});
+    assert.equal(f.e.requireArea(area.id).entryAt,deadline);
     f.report('motion',{action:'single'});area=f.e.requireArea(area.id);
-    assert.deepEqual([area.mode,area.entryAt,area.pendingZoneId],['away',null,null]);
-    assert.deepEqual(f.e.activeIncidents().map(incident=>incident.zoneId),[zone.id]);
+    assert.deepEqual([area.mode,area.entryAt,area.pendingZoneId],['away',deadline,f.door.id]);
+    assert.deepEqual(f.e.activeIncidents().map(incident=>incident.zoneId),[zone.id,zone.id]);
+    assert.equal(f.e.areaView(area).keypadSiren,false);
+    f.advance(19999);f.e.tick();
+    assert.equal(f.e.activeIncidents().length,2);assert.equal(f.e.areaView(f.e.requireArea(area.id)).keypadSiren,false);
+    f.advance(1);f.e.tick();
+    const intrusion=f.e.activeIncidents().find(incident=>incident.zoneId===f.door.id);
+    assert.deepEqual([intrusion.activatedAt,intrusion.raisedAt],[enteredAt,deadline]);
+    assert.equal(f.e.requireArea(area.id).entryAt,null);assert.equal(f.e.areaView(f.e.requireArea(area.id)).keypadSiren,true);
+    const ordinaryDelivery=f.e.queuedActions().find(job=>job.incidentId===intrusion.id);
+    assert.ok(ordinaryDelivery);
+
+    f.e.command(area.id,'disarm',{},'operator');f.normal();
+    f.e.command(area.id,'acknowledge',{},'operator');f.e.command(area.id,'reset',{},'operator');
+    assert.equal(f.s.one('SELECT status FROM security_deliveries WHERE id=?',ordinaryDelivery.id).status,'suppressed');
+    f.arm();f.advance(5000);f.e.tick();
+    f.report('door',{contact:false});f.report('motion',{action:'single'});
+    assert.equal(f.e.requireArea(area.id).pendingZoneId,f.door.id);
+    f.restart();
+    assert.deepEqual(new Set(f.e.activeIncidents().map(incident=>incident.zoneId)),new Set([f.door.id,zone.id]));
+    assert.equal(f.e.requireArea(area.id).entryAt,null);assert.equal(f.e.areaView(f.e.requireArea(area.id)).keypadSiren,true);
+    assert.equal(f.e.queuedActions().length,0);
+    assert.ok(f.e.state().events.some(event=>event.type==='restart_entry_latched'));
   }finally{f.close();}
 });
 

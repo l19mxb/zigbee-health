@@ -113,11 +113,12 @@ export class PushService{
   }
   securityPayload(context,test=false){
     if(test)return {title:'Security notification test',body:'Security push is set up. This is a test; no alarm was triggered.',tag:'zh-security-test',url:'/?security=test'};
-    return {title:'Zigbee Security',body:(this.settings().includeDeviceNames?'Security alarm in '+context.area+'. '+context.zone+' activated.':'An armed area has been activated. Open Security to review.').slice(0,240),tag:'zh-security-'+context.incidentId,url:'/?security='+encodeURIComponent(context.incidentId)};
+    const generic=context.mode==='disarmed'?'A security alarm was triggered. Open Security to review.':'An armed area has been activated. Open Security to review.';
+    return {title:'Zigbee Security',body:(this.settings().includeDeviceNames?'Security alarm in '+context.area+'. '+context.zone+' activated.':generic).slice(0,240),tag:'zh-security-'+context.incidentId,url:'/?security='+encodeURIComponent(context.incidentId)};
   }
   securityParentValid(action,context,deliveryId){
-    const parent=this.s.one("SELECT * FROM security_deliveries WHERE id=? AND status='delivering'",deliveryId),incident=this.s.one('SELECT reset_at FROM security_incidents WHERE id=?',context.incidentId),current=this.s.one('SELECT json FROM security_actions WHERE id=?',action.id),area=this.s.one('SELECT json FROM security_areas WHERE id=?',context.areaId);
-    return !!(parent&&parent.incident_id===context.incidentId&&parent.action_id===action.id&&parent.action_json===JSON.stringify(action)&&parent.context_json===JSON.stringify(context)&&incident&&!incident.reset_at&&current?.json===parent.action_json&&JSON.parse(area?.json||'null')?.enabled);
+    const parent=this.s.one("SELECT * FROM security_deliveries WHERE id=? AND status='delivering'",deliveryId),incident=this.s.one("SELECT reset_at,json_extract(json,'$.zoneType') AS zone_type FROM security_incidents WHERE id=?",context.incidentId),current=this.s.one('SELECT json FROM security_actions WHERE id=?',action.id),area=this.s.one('SELECT json FROM security_areas WHERE id=?',context.areaId);
+    return !!(parent&&parent.incident_id===context.incidentId&&parent.action_id===action.id&&parent.action_json===JSON.stringify(action)&&parent.context_json===JSON.stringify(context)&&incident&&(incident.reset_at===null||incident.zone_type==='24hour')&&current?.json===parent.action_json&&JSON.parse(area?.json||'null')?.enabled);
   }
   sendSecurity(action,context,deliveryId){
     if(this.e.demo||this.stopping||!this.securityTable())return Promise.reject(Error('Security push is unavailable'));

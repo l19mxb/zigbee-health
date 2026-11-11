@@ -58,6 +58,23 @@ test('acknowledging and disarming an already-raised intrusion retain its queued 
   const f=fixture();try{f.add();f.trigger();f.security.command(f.area.id,'acknowledge',{},'Fixture');f.security.command(f.area.id,'disarm',{},'Fixture');await f.deliver();assert.equal(f.sent.length,1);assert.equal(f.security.area(f.area.id).mode,'disarmed');}finally{f.close();}
 });
 
+test('resetting a disarmed 24-hour button alarm retains its queued Security push',async()=>{
+  const f=fixture();try{
+    f.security.saveZone({id:f.zone.id,type:'24hour',property:'action',value:'single',silent:true},'Fixture');
+    f.add();f.security.ingest('contact',{action:'single'});
+    const [alarm]=f.security.activeIncidents(f.area.id);
+    assert.equal(alarm.mode,'disarmed');assert.equal(alarm.zoneType,'24hour');
+    f.security.command(f.area.id,'acknowledge',{},'Fixture');
+    f.security.command(f.area.id,'reset',{},'Fixture');
+    assert.deepEqual(f.security.activeIncidents(f.area.id),[]);
+    await f.deliver();await f.deliver();
+    assert.equal(f.sent.length,1);
+    const payload=JSON.parse(f.sent[0][1]);
+    assert.equal(payload.body,'A security alarm was triggered. Open Security to review.');
+    assert.equal(payload.url,'/?security='+alarm.id);
+  }finally{f.close();}
+});
+
 test('reset, expiry, action changes and action removal permanently suppress unsent recipients',async()=>{
   for(const operation of ['reset','expiry','change','remove']){const f=fixture();try{
     const action=f.add();f.trigger();

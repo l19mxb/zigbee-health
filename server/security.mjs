@@ -356,11 +356,15 @@ export class SecurityEngine {
       const readingTimeoutMin=this.readingTimeoutMin();
       const active=this.zones().filter(z=>this.zoneInArea(z,areaId)&&z.enabled).map(z=>this.zoneView(z,area,'away',readingTimeoutMin)).filter(z=>!z.ready);
       requireValue(!active.length,'Restore or explicitly bypass active and unknown zones before resetting alarm memory');
-      this.s.transaction(()=>{this.s.run('UPDATE security_incidents SET reset_at=? WHERE area_id=? AND reset_at IS NULL',this.now(),areaId);this._suppressArea(areaId,'Alarm memory reset');this.event('alarm_reset',area.name+' alarm memory reset',{areaId,actor});});return this.areaView(area);
+      this.s.transaction(()=>{this.s.run('UPDATE security_incidents SET reset_at=? WHERE area_id=? AND reset_at IS NULL',this.now(),areaId);this._suppressArea(areaId,'Alarm memory reset',{keep24Hour:true});this.event('alarm_reset',area.name+' alarm memory reset',{areaId,actor});});return this.areaView(area);
     }
     return this._arm(area,command==='arm_home'?'home':'away',options.reason,actor);
   }
-  _suppressArea(areaId,reason){this.s.run("UPDATE security_deliveries SET status='suppressed',error=?,finished_at=? WHERE status='queued' AND incident_id IN (SELECT id FROM security_incidents WHERE area_id=?)",reason,this.now(),areaId);this.s.run("UPDATE security_push_deliveries SET status='suppressed',error=?,finished_at=? WHERE status='queued' AND incident_id IN (SELECT id FROM security_incidents WHERE area_id=?)",reason,this.now(),areaId);}
+  _suppressArea(areaId,reason,{keep24Hour=false}={}){
+    const incidents="SELECT id FROM security_incidents WHERE area_id=?"+(keep24Hour?" AND json_extract(json,'$.zoneType') IS NOT '24hour'":"");
+    this.s.run(`UPDATE security_deliveries SET status='suppressed',error=?,finished_at=? WHERE status='queued' AND incident_id IN (${incidents})`,reason,this.now(),areaId);
+    this.s.run(`UPDATE security_push_deliveries SET status='suppressed',error=?,finished_at=? WHERE status='queued' AND incident_id IN (${incidents})`,reason,this.now(),areaId);
+  }
   _boundProperties(deviceId,values){
     const configured=new Set(this.zones().filter(zone=>zone.deviceId===deviceId).map(zone=>zone.property));
     const entries=[...values].sort((a,b)=>Number(configured.has(b[0]))-Number(configured.has(a[0]))||b[1].at-a[1].at);
@@ -443,7 +447,7 @@ export class SecurityEngine {
     if(this.readings.size>4096)this.readings.delete(this.readings.keys().next().value);
   }
   #activateZone(area,zone,at,readingTimeoutMin){
-    if(zone.type==='entry'&&area.entryDelaySec>0&&!this.activeIncidents(area.id).length){
+    if(zone.type==='entry'&&area.entryDelaySec>0&&!this.activeIncidents(area.id).some(incident=>incident.zoneType!=='24hour')){
       if(!area.entryAt){this._saveArea({...area,entryAt:at+area.entryDelaySec*1000,pendingZoneId:zone.id,pendingActivatedAt:at});this.event('entry_started',zone.name+' started the entry delay',{areaId:area.id,zoneId:zone.id});}
     }else this._trigger(area,zone,at,true,readingTimeoutMin);
   }
@@ -462,7 +466,7 @@ export class SecurityEngine {
       if(always&&current.targetMode){
         this._saveArea(this.clearCycleExceptions({...current,mode:'disarmed',targetMode:null,exitAt:null,entryAt:null,pendingZoneId:null,armedAt:null}));
         this.event('arm_blocked',current.name+' did not arm: 24-hour alarm raised',{areaId:area.id,zoneId:zone.id,incidentId:id});
-      }else if(!always||current.entryAt!=null||current.pendingZoneId!=null){
+      }else if(!always){
         this._saveArea({...current,entryAt:null,pendingZoneId:null});
       }
       const context={eventId:String(eventId),incidentId:id,areaId:area.id,area:area.name,zoneId:zone.id,zone:zone.name,deviceId:zone.deviceId,device:d?.name||zone.name,networkId:d?.networkId||null,raisedAt:this.now(),timestamp:new Date(this.now()).toISOString(),mode:area.mode,event:'intrusion',type:'intrusion'};
@@ -524,7 +528,8 @@ export class SecurityEngine {
     if(this.demo)return null;const row=this.s.one("SELECT * FROM security_deliveries WHERE id=? AND status='queued'",identifier(id,'delivery'));if(!row)return null;
     const incident=this.s.one('SELECT * FROM security_incidents WHERE id=?',row.incident_id),action=this.action(row.action_id),area=incident&&this.area(incident.area_id);
     if(this.now()-row.created_at>5*MINUTE){this.s.run("UPDATE security_deliveries SET status='suppressed',error='Alert expired before delivery',finished_at=? WHERE id=?",this.now(),id);this.s.run("UPDATE security_push_deliveries SET status='suppressed',error='Alert expired before delivery',finished_at=? WHERE delivery_id=? AND status='queued'",this.now(),id);return null;}
-    if(!incident||incident.reset_at||!action?.enabled||!area?.enabled||JSON.stringify(action)!==row.action_json){this.s.run("UPDATE security_deliveries SET status='suppressed',error='Alarm reset, area disabled or action changed',finished_at=? WHERE id=?",this.now(),id);this.s.run("UPDATE security_push_deliveries SET status='suppressed',error='Alarm reset, area disabled or action changed',finished_at=? WHERE delivery_id=? AND status='queued'",this.now(),id);return null;}
+    const resetOrdinaryAlarm=incident?.reset_at!=null&&parse(incident.json)?.zoneType!=='24hour';
+    if(!incident||resetOrdinaryAlarm||!action?.enabled||!area?.enabled||JSON.stringify(action)!==row.action_json){this.s.run("UPDATE security_deliveries SET status='suppressed',error='Alarm reset, area disabled or action changed',finished_at=? WHERE id=?",this.now(),id);this.s.run("UPDATE security_push_deliveries SET status='suppressed',error='Alarm reset, area disabled or action changed',finished_at=? WHERE delivery_id=? AND status='queued'",this.now(),id);return null;}
     if(action.kind==='email'&&!this.s.get('email')?.enabled||action.kind==='mqtt'&&!this.s.network(action.networkId)?.enabled||action.kind==='push'&&!this.s.get('pushSettings')?.enabled){this.s.run("UPDATE security_deliveries SET status='suppressed',error='Configured output is disabled or unavailable',finished_at=? WHERE id=?",this.now(),id);this.s.run("UPDATE security_push_deliveries SET status='suppressed',error='Configured output is disabled or unavailable',finished_at=? WHERE delivery_id=? AND status='queued'",this.now(),id);return null;}
     this.s.run("UPDATE security_deliveries SET status='delivering' WHERE id=? AND status='queued'",id);return this.deliveryView({...row,status:'delivering'});
   }
