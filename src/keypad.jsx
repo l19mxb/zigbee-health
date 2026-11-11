@@ -95,7 +95,10 @@ function reviewMatches(review,value){
 function CycleBypasses({areas}){
   const active=areas.filter(area=>area.cycleBypassCount>0||(area.cycleBypasses||[]).length);
   if(!active.length)return null;
-  return <section className="keypad-cycle-bypasses" aria-label="Current arming cycle bypasses">{active.map(area=>{const number=area.cycleBypassCount??area.cycleBypasses.length;return <div key={area.id}><strong>{area.name} · {number} cycle {number===1?'bypass':'bypasses'}</strong><span>{(area.cycleBypasses||[]).map(zone=>zone.name).join(', ')}</span></div>;})}<p>These zones remain excluded until their area disarms.</p></section>;
+  return <section className="keypad-cycle-bypasses" aria-label="Current arming cycle bypasses">{active.map(area=>{
+    const number=area.cycleBypassCount??area.cycleBypasses.length;
+    return <div key={area.id}><strong>{areas.length>1?area.name+' · ':''}{count(number,'zone')} bypassed until disarm</strong><span>{(area.cycleBypasses||[]).map(zone=>zone.name).join(', ')}</span></div>;
+  })}</section>;
 }
 function ReviewZones({title,zones}){
   return <><h4>{title}</h4><ul>{zones.map(zone=><li key={zone.id}><strong>{zone.name}</strong><span>{zone.trouble||(zone.status==='normal'?'Closed / normal':zone.status==='unknown'?'Waiting for a fresh reading':'Open / active')}</span></li>)}</ul></>;
@@ -124,7 +127,7 @@ function ArmBypassReview({review,now,busy,onClose,onConfirm}){
 function PinPad({pin,onChange,disabled,onPhysicalKey}){
   return <div className="keypad-pin-controls"><div className="keypad-pin-entry">
     <div className="keypad-pin-field"><input type="password" className="keypad-pin-input" aria-label="4-digit PIN" aria-describedby="keypad-pin-help" inputMode="numeric" autoComplete="off" maxLength={4} pattern="[0-9]{4}" value={pin} disabled={disabled} onChange={event=>onChange(event.target.value.replace(/[^0-9]/g,'').slice(0,4))} onKeyDown={event=>{if(disabled||!event.isTrusted||event.repeat||event.ctrlKey||event.metaKey||event.altKey)return;const start=event.currentTarget.selectionStart??pin.length,end=event.currentTarget.selectionEnd??start,selected=end>start;if(/^[0-9]$/.test(event.key)&&(pin.length<4||selected)||event.key==='Backspace'&&(selected||start>0)||event.key==='Delete'&&(selected||start<pin.length))onPhysicalKey?.();}}/><span className="keypad-pin-dots" aria-hidden="true">{[0,1,2,3].map(index=><i key={index} className={index<pin.length?'filled':''}/>)}</span></div>
-    <p id="keypad-pin-help">Enter your 4-digit PIN to disarm or reset an alarm</p><span className="sr-only" role="status" aria-live="polite">{pin.length} of 4 digits entered</span>
+    <p id="keypad-pin-help">Enter PIN to disarm or reset</p><span className="sr-only" role="status" aria-live="polite">{pin.length} of 4 digits entered</span>
   </div><div className="keypad-digits" aria-label="PIN keypad">{[1,2,3,4,5,6,7,8,9].map(number=><button key={number} type="button" aria-label={'PIN digit '+number} disabled={disabled||pin.length===4} onClick={()=>onChange(pin+number)}>{number}</button>)}<button type="button" className="keypad-edit-digit" disabled={disabled||!pin} onClick={()=>onChange('')}>Clear</button><button type="button" aria-label="PIN digit 0" disabled={disabled||pin.length===4} onClick={()=>onChange(pin+'0')}>0</button><button type="button" className="keypad-edit-digit" aria-label="Backspace PIN digit" disabled={disabled||!pin} onClick={()=>onChange(pin.slice(0,-1))}>Backspace</button></div></div>;
 }
 
@@ -198,6 +201,9 @@ export default function Keypad({onSecurity,initialBypass,kiosk=false,requestApi=
   const resetHint=blockedReset
     ?blockedReset.resetAlarmMemoryBlock||'Restore the zones and disarm before resetting.'
     :resetRequired&&pin.length!==4?'Enter your PIN to reset alarm memory.':'';
+  const selectionHint=!selected.length?'Select an area.':
+    !zone&&!resetRequired&&selected.some(area=>editable(area)&&area.enabled&&area.includedCount===0)
+      ?'At least one included zone is needed to arm.':'';
   const canBypassZone=item=>canSelectBypasses&&selected.some(area=>area.blockingZones?.some(blocker=>blocker.id===item.id));
   const choose=ids=>{discardReview();updateBypassDraft(null);setSelection(ids);setCarousel(0);setCommandError('');setMessage('');};
   function toggleZoneBypass(item){
@@ -268,29 +274,27 @@ export default function Keypad({onSecurity,initialBypass,kiosk=false,requestApi=
     finally{reviewFlight.current=false;setBusy(false);}
   }
   const closeDialog=()=>{if(!busy){if(dialog==='bypass-arm')discardReview();else{setDialog(null);if(dialog==='disarm-all')setPin('');}}};
-  return <div className="keypad-workspace" onPointerDownCapture={event=>{if(event.isTrusted)feedback('gesture',{pip:false});}} onClickCapture={buttonFeedback}><header className="keypad-header"><h1>Keypad</h1><div><div className="keypad-sound-control"><button type="button" data-keypad-sound-toggle aria-pressed={soundEnabled} aria-label={soundEnabled?'Mute keypad sound':'Enable keypad sound'} onClick={toggleSound}>{soundEnabled?'Sound on':'Sound off'}</button><small>{!soundEnabled?'Muted':soundStatus.supported===false?'Audio unavailable':soundStatus.unlocked?'Enabled':'Tap a key to enable'}</small></div><ThemeControl/><time dateTime={new Date(now).toISOString()} aria-live="off"><strong>{formats.time.format(now)}</strong><span>{formats.date.format(now)}</span></time></div></header>
+  return <div className="keypad-workspace" onPointerDownCapture={event=>{if(event.isTrusted)feedback('gesture',{pip:false});}} onClickCapture={buttonFeedback}><header className="keypad-header"><h1>Keypad</h1><div><div className="keypad-sound-control"><button type="button" data-keypad-sound-toggle aria-pressed={soundEnabled} aria-label={soundEnabled?'Mute keypad sound':'Enable keypad sound'} onClick={toggleSound}>{soundEnabled?'Sound on':'Sound off'}</button>{soundEnabled&&!soundStatus.unlocked?<small>{soundStatus.supported===false?'Audio unavailable':'Tap a key to enable'}</small>:null}</div><ThemeControl/><time dateTime={new Date(now).toISOString()} aria-live="off"><strong>{formats.time.format(now)}</strong><span>{formats.date.format(now)}</span></time></div></header>
     {connectionError&&!kiosk?<div className="notice critical" role="alert"><strong>Keypad connection lost.</strong> Showing the last received state. Controls are unavailable until reconnection.<button onClick={refresh}>Reconnect</button></div>:null}
     {state?.message?<div className="notice" role="status">{state.message}</div>:null}
     {commandError?<div className="notice critical" role="alert">{commandError}</div>:null}{message?<div className="notice" role="status">{message}</div>:null}
     {!state?kiosk&&connectionError?<section className="kiosk-unavailable"><Icon name="shield" size={35}/><h2>Local keypad unavailable</h2><p role="alert">{connectionError}</p><p>Open the configured direct local IP address from an allowed local network. Tunnels and reverse proxies cannot open this keypad.</p><button onClick={refresh}>Try again</button></section>:<div className="keypad-loading" role={connectionError?'alert':'status'}>{loading?'Opening keypad…':connectionError}{connectionError?<button onClick={refresh}>Try again</button>:null}</div>:!areas.length?<section className="keypad-empty"><Icon name="shield" size={35}/><h2>{kiosk?'No areas available on this kiosk':'No security areas configured'}</h2><p>{kiosk?'An administrator can update the local kiosk area selection.':'An administrator can add areas and zones under Security. New areas start disarmed.'}</p>{onSecurity&&!kiosk?<button onClick={onSecurity}>Open Security</button>:null}</section>:<div className="keypad-console">
-      <section className="keypad-areas" aria-label="Keypad areas"><div className="keypad-areas-heading"><h2>Areas</h2><button disabled={busy} onClick={()=>choose(selectedIds.length===areas.length?[]:areas.map(area=>area.id))}>{selectedIds.length===areas.length?'Clear selection':'Select all'}</button></div><div className="keypad-area-list">{areas.map(area=>{const status=indicator(area),checked=selectedIds.includes(area.id);return <label key={area.id} className={'keypad-area-row '+(checked?'selected':'')}><input type="checkbox" aria-label={'Select area '+area.name} checked={checked} disabled={busy} onChange={event=>choose(event.target.checked?[...selectedIds,area.id]:selectedIds.filter(id=>id!==area.id))}/><span className="keypad-area-copy"><strong>{area.name}</strong><small>{status.label}</small>{area.cycleBypassCount>0?<small className="keypad-cycle-count">{area.cycleBypassCount} cycle {area.cycleBypassCount===1?'bypass':'bypasses'}</small>:null}</span><AreaIndicators status={status}/></label>;})}</div></section>
-      <section className="keypad-control-panel" aria-label="Area keypad"><header className="keypad-selection"><h2>{selected.length===1?selected[0].name:selected.length?count(selected.length,'area')+' selected':'Select areas'}</h2><p>{selected.length===1?'1 area selected':selected.length?selected.map(area=>area.name).join(', '):'Choose one or more areas from the list.'}</p></header>
+      <section className="keypad-areas" aria-label="Keypad areas"><div className="keypad-areas-heading"><h2>Areas</h2>{areas.length>1?<button disabled={busy} onClick={()=>choose(selectedIds.length===areas.length?[]:areas.map(area=>area.id))}>{selectedIds.length===areas.length?'Clear selection':'Select all'}</button>:null}</div><div className="keypad-area-list">{areas.map(area=>{const status=indicator(area),checked=selectedIds.includes(area.id);return <label key={area.id} className={'keypad-area-row '+(checked?'selected':'')}><input type="checkbox" aria-label={'Select area '+area.name} checked={checked} disabled={busy} onChange={event=>choose(event.target.checked?[...selectedIds,area.id]:selectedIds.filter(id=>id!==area.id))}/><span className="keypad-area-copy"><strong>{area.name}</strong>{!['Ready','Not ready'].includes(status.label)?<small>{status.label}</small>:null}{area.cycleBypassCount>0?<small className="keypad-cycle-count">{area.cycleBypassCount} cycle {area.cycleBypassCount===1?'bypass':'bypasses'}</small>:null}</span><AreaIndicators status={status}/></label>;})}</div></section>
+      <section className="keypad-control-panel" aria-label="Area keypad">
         <CycleBypasses areas={selected}/>
-        <div className="keypad-not-ready-carousel" aria-live="polite">
+        {selectionHint?<p className="keypad-selection-hint" role="status">{selectionHint}</p>:null}
+        {zone?<><div className="keypad-not-ready-carousel" aria-live="polite">
           <button className="icon-button" aria-label="Previous not ready zone" disabled={zones.length<2} onClick={()=>setCarousel((index+zones.length-1)%zones.length)}><Icon name="chevron" className="flip" size={25}/></button>
-          <div>{zone?<><strong>{zone.name}</strong><p>{zone.reason} · {index+1} of {zones.length} not ready</p>
+          <div><strong>{zone.name}</strong><p>{zone.reason} · {index+1} of {zones.length} not ready</p>
             {selected.length>1?<small>{zone.areaNames.join(', ')}</small>:null}
             {zone.contextNames.length?<small>{zone.contextNames.join('; ')}</small>:null}
             {canBypassZone(zone)?<button type="button" className="keypad-zone-bypass" disabled={!available}
               aria-label={bypassZoneIds.includes(zone.id)?'Undo bypass for '+zone.name:'Bypass '+zone.name+' for next arm'}
               onClick={()=>toggleZoneBypass(zone)}>{bypassZoneIds.includes(zone.id)?'Undo bypass':'Bypass'}</button>:null}
-          </>:<>
-            <strong>{!selected.length?'Select an area':armReady?'All selected areas ready':selected.every(area=>area.mode!=='disarmed')?'Selected areas armed':'Area status'}</strong>
-            <p>{!selected.length?'Area selection is required for commands.':armReady?'Ready to arm Away':resetRequired?'Use Reset after the areas are disarmed and the zones have restored.':selected.some(area=>!area.enabled)?'One or more selected areas are disabled.':selected.some(area=>!area.zoneCount)?'Add an enabled zone before arming.':'Review the selected area status before arming.'}</p>
-          </>}</div>
+          </div>
           <button className="icon-button" aria-label="Next not ready zone" disabled={zones.length<2} onClick={()=>setCarousel((index+1)%zones.length)}><Icon name="chevron" size={25}/></button>
         </div>
-        <button className="text-button keypad-all-zones" disabled={!zones.length} onClick={()=>setDialog('zones')}>Show all not ready zones</button>
+        <button className="text-button keypad-all-zones" onClick={()=>setDialog('zones')}>Show all not ready zones</button></>:null}
         {bypassZoneIds.length?<section className="keypad-cycle-bypasses" aria-label="Zone bypasses for next arm">
           <strong>Bypass for next arm</strong><span>{[...pendingBypassNames.values()].join(', ')}</span>
           <button type="button" className="text-button" disabled={!available} onClick={()=>{discardReview();updateBypassDraft(null);}}>Clear pending bypasses</button>
@@ -299,18 +303,18 @@ export default function Keypad({onSecurity,initialBypass,kiosk=false,requestApi=
           <PinPad pin={pin} onChange={setPin} disabled={busy||!!connectionError||state.readOnly} onPhysicalKey={()=>feedback('gesture',{pip:true})}/>
           <div className="keypad-command-buttons">
             <button className="primary" disabled={!mayArm} title={!state.canArm?'Security control access is required':!armReady?'Select only disarmed, ready areas to arm':undefined} onClick={()=>void (bypassZoneIds.length?prepareBypass('away'):command('arm_away'))}>Arm away</button>
+            <button className="keypad-disarm-selected" disabled={!mayDisarm||!selected.length} onClick={()=>void command('disarm')}>Disarm selected</button>
+            <button className={'keypad-reset'+(resetRequired?' required':'')} disabled={!mayReset}
+              aria-describedby={resetHint?'keypad-reset-hint':undefined} onClick={()=>void command('reset_alarm_memory')}>Reset</button>
+            <button className="keypad-disarm-all" disabled={!mayDisarm} onClick={()=>setDialog('disarm-all')}>{kiosk?'Disarm all permitted':'Disarm all assigned'}</button>
             {showForceArm?<div className="keypad-arm-options">
               <button className="keypad-force-arm" disabled={!mayForceArm} aria-describedby={forceBlock?'keypad-force-block':undefined} title="Review open and waiting zones before Force Arm" onClick={()=>void prepareBypass('force')}>Force Arm</button>
               {forceBlock?<p id="keypad-force-block" className="keypad-force-block">{forceBlock}</p>:null}
             </div>:null}
-            <button className="keypad-disarm-selected" disabled={!mayDisarm||!selected.length} onClick={()=>void command('disarm')}>Disarm selected</button>
-            <button className="keypad-disarm-all" disabled={!mayDisarm} onClick={()=>setDialog('disarm-all')}>{kiosk?'Disarm all permitted':'Disarm all assigned'}</button>
-            <button className={'keypad-reset'+(resetRequired?' required':'')} disabled={!mayReset}
-              aria-describedby={resetHint?'keypad-reset-hint':undefined} onClick={()=>void command('reset_alarm_memory')}>Reset</button>
             {resetHint?<p id="keypad-reset-hint" className="keypad-reset-hint">{resetHint}</p>:null}
           </div>
         </div>
-        <p className="keypad-footnote">{kiosk?'Local kiosk: arm selected ready areas without a PIN. Disarm and Reset require an authorised PIN.':<>Arm away does not need a PIN.{!state.canArm?' Your session needs security control access to arm areas.':''}</>}</p>
+        {!kiosk&&!state.canArm?<p className="keypad-footnote">Security control access is required to arm.</p>:null}
       </section>
     </div>}
     {dialog==='bypass-arm'&&armReview?<ArmBypassReview review={armReview} now={now} busy={busy} onClose={closeDialog} onConfirm={confirmBypass}/>:dialog==='zones'?<Modal title="Not ready zones" wide onClose={closeDialog}><p className="keypad-zone-help">Enabled zones that are open or have trouble, including zones bypassed manually or in Home mode. Arming follows the existing area rules.</p><div className="table-scroll keypad-zone-table"><table><thead><tr><th>Zone</th><th>Area</th><th>Reason</th></tr></thead><tbody>{zones.map(item=><tr key={item.id}><td><strong>{item.name}</strong></td><td>{item.areaNames.join(', ')}</td><td>{item.reason}{item.contextNames.length?<span className="row-subtitle">{item.contextNames.join('; ')}</span>:null}</td></tr>)}</tbody></table></div><div className="form-actions"><button onClick={closeDialog}>Close</button></div></Modal>:dialog==='disarm-all'?<Modal title={kiosk?'Disarm all permitted kiosk areas':'Disarm all assigned areas'} onClose={closeDialog}><p>{kiosk?'Disarm every area permitted by both this kiosk and the entered PIN, including permitted areas not selected on this screen.':'Disarm every area assigned to the entered PIN, including areas not selected on this screen. The PIN owner must have security control access.'}</p><div className="form-actions"><button disabled={busy} onClick={closeDialog}>Cancel</button><button className="primary" disabled={!mayDisarm} onClick={()=>void command('disarm',true)}>{kiosk?'Disarm all permitted':'Disarm all assigned'}</button></div></Modal>:null}
