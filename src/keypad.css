@@ -10,6 +10,20 @@
 .keypad-arm-options>button:only-of-type{grid-column:1/-1}
 .keypad-arm-options>.keypad-force-arm{font-weight:700}
 .keypad-force-block{grid-column:1/-1;color:var(--warning-ink);font-size:11px;line-height:1.4;overflow-wrap:anywhere}
+.keypad-zone-bypass{margin-top:8px;min-height:44px;padding:6px 12px;font-size:13px}
+.keypad-reset-hint{grid-column:1/-1;color:var(--warning-ink);font-size:12px;line-height:1.4}
+.keypad-command-buttons .keypad-reset:disabled{
+  background:var(--surface-soft);
+  border-color:var(--border);
+  color:var(--muted);
+}
+.keypad-command-buttons .keypad-reset.required,
+:root[data-theme=dark] .keypad-command-buttons .keypad-reset.required{
+  background:#a82b3a;
+  border-color:#e36d7b;
+  color:#fff;
+}
+.keypad-command-buttons .keypad-reset.required:disabled{opacity:.78}
 @media(min-width:601px) and (max-width:850px){.keypad-arm-options{grid-column:1/-1;grid-row:2}}
 @media(min-width:900px) and (min-height:780px) and (orientation:landscape){.kiosk-page .keypad-arm-options>button{min-height:48px}}
 

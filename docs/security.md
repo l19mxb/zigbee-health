@@ -240,32 +240,34 @@ does not need a PIN. Existing readiness checks apply. The keypad shows blocking
 zones and never silently bypasses them. A multi-area command either succeeds
 for the complete selection or leaves it unchanged.
 
-**Force Arm** reviews the selected areas and arms Away after confirmation.
-Currently open or active zones are bypassed until disarm. Zones waiting for a
-fresh report stay in the armed area. If the first fresh report is active, the
-zone follows its configured Entry or Instant rule. If that report arrives
-during the exit delay and the zone is still active when the delay ends, the
-rule runs after the area arms. Offline devices, unavailable brokers and
-invalid sensor readings still block Force Arm. Each selected area must keep
-at least one enabled zone under protection.
+Use **Bypass** on a displayed blocking zone to select it for the next arm.
+**Undo bypass** removes that choice before arming. **Arm away** reviews the
+selected bypasses before confirmation and still requires any remaining zones
+to be ready.
 
-If selected areas have open, unknown or unavailable zones, **Bypass and arm**
-opens a review of the exact zones to be left unprotected in each area. Confirm
-the review to arm. A reason is optional. Each area must retain at least
-one enabled, protected zone. Disabled areas, areas without zones and unresolved
-alarm memory cannot be bypassed through this flow. The confirmation expires
-after two minutes; changed conditions or access require a fresh review.
+**Force Arm** reviews all currently open or active zones and any zones you
+selected with **Bypass**. Confirm to arm Away with those zones excluded.
+Zones waiting for a fresh report stay protected unless you explicitly bypassed
+them. A fresh active report follows the zone's configured Entry or Instant
+rule. If it arrives during the exit delay and the zone stays active, the rule
+runs after the area arms. Offline devices, unavailable brokers and invalid
+sensor readings must be individually bypassed or resolved before arming.
+
+Each area must retain at least one enabled, protected zone. Disabled areas,
+areas without zones and unresolved alarm memory still prevent arming.
+The review expires after two minutes, and changed conditions or access require
+a fresh review.
 
 These bypasses last until that area is disarmed, even if a sensor returns to
 normal. The keypad keeps their names visible. They survive a restart of a fully
 armed area, but are cleared if an unfinished exit delay is cancelled. New faults
-during the exit delay are not automatically bypassed. A detector shared with
-another area continues to protect that other area. The green Ready LED still
-flashes for the underlying open, trouble or alarm condition.
+during the exit delay are not automatically bypassed. A shared detector
+continues to protect areas outside the selection. The green Ready LED still
+shows the area's underlying zone readiness.
 
-An anonymous local kiosk offers **Force Arm** and **Bypass and arm** only when an
-administrator enables **Allow bypass and arm** in its settings. Scheduled
-arming never chooses bypasses automatically.
+An anonymous local kiosk offers **Force Arm** and individual zone bypasses only
+when an administrator enables **Allow bypass and arm** in its settings.
+Scheduled arming never chooses bypasses automatically.
 
 Set a personal four-digit PIN in **My account & app → Keypad PIN**, confirming
 your current dashboard password. An administrator can also use **Users →
@@ -279,6 +281,11 @@ Disarming is attributed to the PIN owner. A signed-in Security viewer
 can display a wall keypad; the entered PIN supplies the authority to disarm.
 An explicit selection containing an unassigned area is rejected as a whole.
 The all-areas command means all areas permitted to that PIN owner.
+
+**Reset** lights red when a selected area has alarm memory. Disarm the area and
+restore its zones, then enter a PIN assigned to that area and press **Reset**.
+The keypad acknowledges its outstanding alarms and clears its alarm memory.
+The button is grey when no selected area needs a reset.
 
 PINs are stored with salted password hashing and an installation-key-bound
 lookup. The API never returns a saved code. Failed PIN and current-password

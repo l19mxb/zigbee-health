@@ -249,9 +249,20 @@ export class SecurityEngine {
       'Force Arm only bypasses known open zones and keeps available zones awaiting a fresh report protected. Resolve zone trouble in '+area.name+' first.');
     return {bypassZones,awaitingZones};
   }
-  armWithCycleBypass(areaId,zoneIds,reason,actor,{openOnly=false,awaitingZoneIds=[]}={}){
+  cycleArmingPlan(area,ready,{openOnly=false,selectedZoneIds=null}={}){
+    if(selectedZoneIds===null)return openOnly?this.forceArmBlockers(area,ready):{bypassZones:ready.blockingZones,awaitingZones:[]};
+    const selectedIds=new Set(selectedZoneIds),selected=ready.blockingZones.filter(zone=>selectedIds.has(zone.id));
+    const remaining=ready.blockingZones.filter(zone=>!selectedIds.has(zone.id));
+    if(openOnly){
+      const {bypassZones,awaitingZones}=this.forceArmBlockers(area,{...ready,blockingZones:remaining});
+      return {bypassZones:[...selected,...bypassZones],awaitingZones};
+    }
+    requireValue(!remaining.length,'Area not ready: '+remaining.map(zone=>zone.name+' ('+zone.status+')').join(', '));
+    return {bypassZones:selected,awaitingZones:[]};
+  }
+  armWithCycleBypass(areaId,zoneIds,reason,actor,{openOnly=false,awaitingZoneIds=[],selectedZoneIds=null}={}){
     const area=this.requireArea(areaId),ready=this.readiness(area,'away');
-    const {bypassZones,awaitingZones}=openOnly?this.forceArmBlockers(area,ready):{bypassZones:ready.blockingZones,awaitingZones:[]};
+    const {bypassZones,awaitingZones}=this.cycleArmingPlan(area,ready,{openOnly,selectedZoneIds});
     const matches=(ids,zones)=>Array.isArray(ids)&&ids.length===zones.length&&new Set(ids).size===ids.length&&ids.every(id=>zones.some(zone=>zone.id===id));
     requireValue(matches(zoneIds,bypassZones)&&matches(awaitingZoneIds,awaitingZones),'The arming review changed; review it again');
     return this._arm(area,'away',text(reason,'Bypass reason',300),actorName(actor),{zoneIds,awaitingZoneIds});

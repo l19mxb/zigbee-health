@@ -76,6 +76,34 @@ test('PIN disarm requires exact dual scope while all disarms only the PIN and ki
   }finally{f.close();}
 });
 
+test('kiosk reset preserves dual scope and shared PIN throttling without exposing the PIN owner',()=>{
+  const f=fixture();try{
+    const [first,second,third]=f.areas.map(area=>area.id);
+    f.enable({areaIds:[first,second]});f.pin([first,third]);
+    for(const [index,area] of f.areas.entries()){
+      const device='kiosk-device-'+index;
+      f.security.command(area.id,'arm_away',{},'Fixture');
+      f.security.ingest(device,{contact:false});f.security.command(area.id,'disarm',{},'Fixture');
+      f.security.ingest(device,{contact:true});
+    }
+    const action='reset_alarm_memory',pin='0471',status=f.kiosk.state();
+    assert.deepEqual(status.areas.map(area=>[area.id,area.canResetAlarmMemory,area.resetAlarmMemoryBlock]),[[first,true,null],[second,true,null]]);
+    const before=f.s.all('SELECT * FROM security_incidents ORDER BY id');
+    for(const areaIds of [[first,second],[first,third]])assert.throws(()=>f.kiosk.command({action,pin,areaIds}),error=>error.statusCode===403&&/does not permit/.test(error.message));
+    assert.deepEqual(f.s.all('SELECT * FROM security_incidents ORDER BY id'),before);
+    assert.equal(f.s.one("SELECT failures FROM security_keypad_throttle WHERE scope='pin'").failures,2);
+    assert.equal(f.security.state().events.find(event=>event.type==='keypad_pin_rejected'&&event.actor==='Local kiosk').message,'Keypad alarm memory reset attempt rejected');
+    const result=f.kiosk.command({action,pin,areaIds:[first]});
+    assert.equal(result.ok,true);assert.equal(result.action,action);assert.deepEqual(result.areaIds,[first]);
+    assert.equal(result.areas[0].activeAlarmCount,0);assert.equal(result.areas[0].canResetAlarmMemory,false);
+    assert.equal(JSON.stringify(result).includes(f.operator.username),false);assert.equal(JSON.stringify(result).includes(JSON.stringify(pin)),false);
+    assert.deepEqual(new Set(f.security.activeIncidents().map(incident=>incident.areaId)),new Set([second,third]));
+    assert.equal(f.security.state().events.find(event=>event.type==='alarm_reset'&&event.areaId===first).actor,f.operator.username);
+    assert.equal(f.s.one("SELECT failures FROM security_keypad_throttle WHERE scope='pin'").failures,2);
+    assert.equal(f.s.all('SELECT * FROM auth_sessions').length,0);
+  }finally{f.close();}
+});
+
 test('kiosk and authenticated PIN attempts share persistent global budget, including generic rejection audit',()=>{
   const f=fixture();try{f.pin();f.enable();for(let index=0;index<3;index++)assert.throws(()=>f.kiosk.command({action:'disarm',all:true,pin:'9998'}),/does not permit/);for(let index=0;index<2;index++)assert.throws(()=>f.keypad.command(f.operator,{action:'disarm',all:true,pin:'9998'}),/does not permit/);assert.throws(()=>new Kiosk(f.keypad,{recognizesOrigin:()=>true}).command({action:'disarm',all:true,pin:'0471'}),error=>error.statusCode===429);assert.equal(f.s.one("SELECT failures FROM security_keypad_throttle WHERE scope='pin'").failures,5);assert.equal(f.security.state().events.find(event=>event.type==='keypad_pin_rejected'&&event.actor==='Local kiosk').message,'Keypad disarm attempt rejected');
   }finally{f.close();}
@@ -103,7 +131,12 @@ test('HTTP kiosk exemptions stay exact, gated and separate from the main authent
     for(const headers of [{'x-forwarded-for':'127.0.0.1'},{'cf-connecting-ip':'127.0.0.1'},{host:'localhost:'+port}])assert.equal((await request('/api/kiosk/state',{headers})).status,403);
     for(const route of ['/x/../api/kiosk/state','http://127.0.0.1:'+port+'/api/kiosk/state'])assert.equal((await request(route)).status,403);
     assert.equal((await request('/api/kiosk/command',{method:'POST',body:{action:'arm_away',all:true},headers:{'content-type':'application/json'}})).status,403);assert.equal((await request('/api/kiosk/command',{method:'POST',body:{action:'arm_away',all:true},headers:{origin:local,'content-type':'text/plain'}})).status,415);
-    assert.equal((await request('/api/kiosk/command',{method:'POST',body:{action:'arm_away',all:true},headers:{origin:local,'content-type':'application/json','sec-fetch-site':'same-origin'}})).status,200);assert.equal(f.security.area(f.areas[0].id).mode,'away');assert.equal(f.s.all('SELECT * FROM auth_sessions').length,0);
+    const commandHeaders={origin:local,'content-type':'application/json','sec-fetch-site':'same-origin'};
+    assert.equal((await request('/api/kiosk/command',{method:'POST',body:{action:'arm_away',all:true},headers:commandHeaders})).status,200);assert.equal(f.security.area(f.areas[0].id).mode,'away');assert.equal(f.s.all('SELECT * FROM auth_sessions').length,0);
+    f.pin();f.security.ingest('kiosk-device-0',{contact:false});f.security.command(f.areas[0].id,'disarm',{},'Fixture');f.security.ingest('kiosk-device-0',{contact:true});
+    const reset={action:'reset_alarm_memory',areaIds:[f.areas[0].id],pin:'0471'};
+    const resetReply=await request('/api/kiosk/command',{method:'POST',body:reset,headers:commandHeaders});
+    assert.equal(resetReply.status,200);assert.equal(resetReply.body.action,reset.action);assert.equal(resetReply.body.areas[0].activeAlarmCount,0);assert.equal(f.s.all('SELECT * FROM auth_sessions').length,0);
     const login=await request('/api/login',{method:'POST',body:{username:'admin',password},headers:{'content-type':'application/json'}}),cookie=login.headers['set-cookie'][0].split(';')[0];assert.equal(login.status,200);assert.equal((await request('/api/kiosk/settings',{headers:{cookie}})).status,200);assert.equal((await request('/api/keypad',{headers:{cookie}})).status,200);
   }finally{server?.closeAllConnections();if(server)await new Promise(resolve=>server.close(resolve));f.close();}
 });

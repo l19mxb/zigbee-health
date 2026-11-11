@@ -29,6 +29,82 @@ const rows=f=>({areas:f.s.all('SELECT * FROM security_areas ORDER BY id'),zones:
 const prepareForce=(f,areaIds=[f.a.id])=>f.keypad.command(f.admin,{action:'prepare_force_arm_away',areaIds});
 const confirmForce=(f,prepared,areaIds=[f.a.id])=>f.keypad.command(f.admin,{action:'force_arm_away',areaIds,bypass:{token:prepared.preview.token}});
 
+test('selective Arm Away bypasses only reviewed blockers for the selected area and cycle',()=>{
+  const f=fixture();try{
+    f.report('shared',true);f.report('inside-a',true);
+    const request={action:'prepare_arm_away',areaIds:[f.a.id],bypassZoneIds:[f.zones[0].id]};
+    const blocked=rows(f);
+    assert.throws(()=>f.keypad.command(f.admin,request),/Area not ready: Zone inside-a/);
+    assert.deepEqual(rows(f),blocked);
+    f.report('inside-a',false);
+    const before=rows(f),prepared=f.keypad.command(f.admin,request);
+    assert.deepEqual(rows(f),before);
+    assert.deepEqual(prepared.preview.areas[0].blockingZones.map(zone=>zone.id),[f.zones[0].id]);
+    assert.equal(prepared.preview.areas[0].protectedZoneCount,2);
+    assert.throws(()=>f.keypad.command(f.admin,{...request,action:'arm_away',bypass:{token:prepared.preview.token}}),/only when reviewing/);
+    f.confirm(prepared);
+    assert.deepEqual(f.security.area(f.a.id).cycleBypass.zoneIds,[f.zones[0].id]);
+    assert.equal(f.security.area(f.b.id).mode,'disarmed');
+    assert.equal(f.security.areaView(f.security.area(f.b.id)).cycleBypassCount,0);
+    assert.deepEqual(rows(f).zones,before.zones);
+    f.security.command(f.a.id,'disarm',{},'Fixture');
+    assert.equal(f.security.areaView(f.security.area(f.a.id)).cycleBypassCount,0);
+    assert.throws(()=>f.keypad.command(f.admin,{action:'arm_away',areaIds:[f.a.id]}),/Area not ready/);
+  }finally{f.close();}
+});
+
+test('selected zone previews require current included blockers and expire when conditions change',()=>{
+  const f=fixture();try{
+    f.report('inside-a',true);f.report('inside-b',true);
+    const request={action:'prepare_arm_away',areaIds:[f.a.id],bypassZoneIds:[f.zones[1].id]};
+    const before=rows(f);
+    assert.throws(()=>f.keypad.command(f.admin,{...request,bypassZoneIds:[]}),/Choose valid bypass zones/);
+    assert.throws(()=>f.keypad.command(f.admin,{...request,bypassZoneIds:[f.zones[1].id,f.zones[1].id]}),/without duplicates/);
+    assert.throws(()=>f.keypad.command(f.admin,{action:request.action,all:true,bypassZoneIds:request.bypassZoneIds}),/explicit area selection/);
+    for(const zoneId of [f.zones[0].id,f.zones[2].id])assert.throws(()=>f.keypad.command(f.admin,{...request,bypassZoneIds:[...request.bypassZoneIds,zoneId]}),/no longer blocks any selected area/);
+    assert.deepEqual(rows(f),before);
+    const prepared=f.keypad.command(f.admin,request);
+    f.report('inside-a',false);f.report('extra-a',true);
+    assert.throws(()=>f.confirm(prepared),/Area not ready: Zone extra-a/);
+    assert.throws(()=>f.confirm(prepared),/expired or changed/);
+    assert.equal(f.security.area(f.a.id).mode,'disarmed');
+  }finally{f.close();}
+});
+
+test('selective Force Arm combines chosen trouble with automatic open bypass and protects other awaiting zones',()=>{
+  const f=fixture();try{
+    f.s.saveDevice({...f.s.device('shared'),availability:'offline'});
+    f.report('inside-a',true);f.security.readings.delete('extra-a');
+    assert.throws(()=>prepareForce(f),/Resolve zone trouble/);
+    const before=rows(f),prepared=f.keypad.command(f.admin,{action:'prepare_force_arm_away',areaIds:[f.a.id],bypassZoneIds:[f.zones[0].id]});
+    const plan=prepared.preview.areas[0];
+    assert.deepEqual(plan.blockingZones.map(({id,status})=>[id,status]),[[f.zones[0].id,'trouble'],[f.zones[1].id,'active']]);
+    assert.deepEqual(plan.awaitingZones.map(zone=>zone.id),[f.zones[3].id]);
+    assert.equal(plan.protectedZoneCount,1);assert.deepEqual(rows(f),before);
+    confirmForce(f,prepared);
+    assert.deepEqual(f.security.area(f.a.id).cycleBypass.zoneIds,[f.zones[0].id,f.zones[1].id]);
+    assert.deepEqual(f.security.area(f.a.id).cycleAwaiting.zoneIds,[f.zones[3].id]);
+    assert.deepEqual(rows(f).zones,before.zones);
+    assert.match(f.security.state().events.find(event=>event.type==='cycle_bypass_armed').message,/reviewed selected zones/);
+  }finally{f.close();}
+});
+
+test('kiosk selected bypass remains gated by configuration and scoped area membership',()=>{
+  const f=fixture();try{
+    f.report('shared',true);f.report('inside-b',true);
+    const request={action:'prepare_arm_away',areaIds:[f.a.id],bypassZoneIds:[f.zones[0].id]};
+    f.enable({allAreas:false,areaIds:[f.a.id],allowBypassArming:false});
+    assert.throws(()=>f.kiosk.command(request),error=>error.statusCode===403);
+    f.enable({allAreas:false,areaIds:[f.a.id]});
+    assert.throws(()=>f.kiosk.command({...request,areaIds:[f.a.id,f.b.id]}),error=>error.statusCode===403);
+    assert.throws(()=>f.kiosk.command({...request,bypassZoneIds:[f.zones[0].id,f.zones[2].id]}),/no longer blocks any selected area/);
+    const prepared=f.kiosk.command(request);
+    const armed=f.kiosk.command({action:'arm_away',areaIds:[f.a.id],bypass:{token:prepared.preview.token}});
+    assert.deepEqual(armed.areas[0].cycleBypasses.map(zone=>zone.id),[f.zones[0].id]);
+    assert.equal(f.security.area(f.b.id).mode,'disarmed');
+  }finally{f.close();}
+});
+
 test('Force Arm previews known open zones and applies only per-area cycle bypasses with a fixed audit reason',()=>{
   const f=fixture();try{
     f.report('inside-a',true);
@@ -317,7 +393,8 @@ test('arming revisions are opaque and change on scope-relevant configuration, ac
 
 test('existing HTTP command endpoints enforce preview authority while direct Security rejects bypass fields',async()=>{
   const f=fixture();let server;try{f.report('shared',true);server=createApp(f.health,{password,security:f.security,keypad:f.keypad,kiosk:f.kiosk});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const port=server.address().port,local='http://127.0.0.1:'+port;f.enable({origin:local});const request=(route,body,cookie)=>new Promise((resolve,reject)=>{const req=http.request({host:'127.0.0.1',port,path:'/api/'+route,method:'POST',headers:{origin:local,'content-type':'application/json',...(cookie?{cookie}:{})}},res=>{let raw='';res.on('data',part=>raw+=part);res.on('end',()=>resolve({status:res.statusCode,body:JSON.parse(raw),cookie:res.headers['set-cookie']?.[0].split(';')[0]}));});req.on('error',reject);req.end(JSON.stringify(body));});
-    assert.equal((await request('keypad/command',{action:'prepare_arm_away',areaIds:[f.a.id]})).status,401);const login=await request('login',{username:'admin',password});assert.equal((await request('security/command',{areaId:f.a.id,action:'disarm',actor:'forged-actor'},login.cookie)).status,200);assert.equal(f.security.state().events.find(event=>event.type==='area_disarmed').actor,'admin');for(const bypass of [{bypass:{token:'a'.repeat(64),reason}},{bypassZoneIds:[f.zones[0].id]},{cycleBypass:{zoneIds:[f.zones[0].id]}}])assert.equal((await request('security/command',{areaId:f.a.id,action:'arm_away',actor:'forged-actor',...bypass},login.cookie)).status,400);assert.equal((await request('security/command',{areaId:f.a.id,action:'prepare_arm_away'},login.cookie)).status,400);
-    const preview=await request('kiosk/command',{action:'prepare_arm_away',areaIds:[f.a.id]});assert.equal(preview.status,200);assert.equal((await request('kiosk/command',{action:'arm_away',areaIds:[f.a.id],bypass:{token:preview.body.preview.token,reason}})).status,200);assert.equal(f.security.area(f.a.id).mode,'away');assert.equal(f.security.areaView(f.security.area(f.a.id)).cycleBypassCount,1);
+    const selectedPreview={action:'prepare_arm_away',areaIds:[f.a.id],bypassZoneIds:[f.zones[0].id]};
+    assert.equal((await request('keypad/command',selectedPreview)).status,401);const login=await request('login',{username:'admin',password});assert.equal((await request('keypad/command',selectedPreview,login.cookie)).status,200);assert.equal((await request('security/command',{areaId:f.a.id,action:'disarm',actor:'forged-actor'},login.cookie)).status,200);assert.equal(f.security.state().events.find(event=>event.type==='area_disarmed').actor,'admin');for(const bypass of [{bypass:{token:'a'.repeat(64),reason}},{bypassZoneIds:[f.zones[0].id]},{cycleBypass:{zoneIds:[f.zones[0].id]}}])assert.equal((await request('security/command',{areaId:f.a.id,action:'arm_away',actor:'forged-actor',...bypass},login.cookie)).status,400);assert.equal((await request('security/command',{areaId:f.a.id,action:'prepare_arm_away'},login.cookie)).status,400);
+    const preview=await request('kiosk/command',selectedPreview);assert.equal(preview.status,200);assert.equal((await request('kiosk/command',{action:'arm_away',areaIds:[f.a.id],bypass:{token:preview.body.preview.token,reason}})).status,200);assert.equal(f.security.area(f.a.id).mode,'away');assert.equal(f.security.areaView(f.security.area(f.a.id)).cycleBypassCount,1);
   }finally{server?.closeAllConnections();if(server)await new Promise(resolve=>server.close(resolve));f.close();}
 });

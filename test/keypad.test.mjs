@@ -93,6 +93,64 @@ test('a read-only wall session may disarm with an enabled authorized control use
   }finally{f.close();}
 });
 
+test('keypad reset uses the PIN owner and atomically acknowledges only restored, disarmed selected alarm memory',()=>{
+  const f=fixture();try{
+    const areaIds=[f.one.id,f.two.id],body={action:'reset_alarm_memory',areaIds,pin:'0471'};
+    const blocked=pattern=>error=>error.statusCode===409&&pattern.test(error.message);
+    const snapshot=()=>({incidents:f.s.all('SELECT * FROM security_incidents ORDER BY id'),events:f.s.all('SELECT * FROM security_events ORDER BY id')});
+    f.pin(f.operator,'0471',areaIds);f.arm();
+    f.security.ingest('one',{contact:false});f.security.ingest('two',{contact:false});
+    assert.throws(()=>f.keypad.command(f.wall,body),blocked(/Disarm House/));
+    for(const id of areaIds)f.security.command(id,'disarm',{},'Fixture');
+    f.security.ingest('one',{contact:true});
+    f.security.bypassZone(f.zones[1].id,{durationMin:null,reason:'Synthetic maintenance'},'Fixture');
+    const state=f.keypad.state(f.wall).areas;
+    assert.equal(state[0].canResetAlarmMemory,true);assert.equal(state[0].resetAlarmMemoryBlock,null);
+    assert.equal(state[1].canResetAlarmMemory,false);assert.match(state[1].resetAlarmMemoryBlock,/Restore open or troubled zones in Garage/);
+    const before=snapshot();
+    assert.throws(()=>f.keypad.command(f.wall,body),blocked(/Restore open or troubled zones in Garage/));
+    assert.deepEqual(snapshot(),before);
+    f.normal();f.s.saveDevice({...f.s.device('two'),availability:'offline'});
+    const offlineBefore=snapshot();
+    assert.throws(()=>f.keypad.command(f.wall,body),blocked(/Restore open or troubled zones in Garage/));
+    assert.deepEqual(snapshot(),offlineBefore);
+    f.s.saveDevice({...f.s.device('two'),availability:'online'});f.normal();
+    f.security.command(f.one.id,'acknowledge',{},'Prior operator');
+    assert.throws(()=>f.keypad.command(f.wall,{action:body.action,all:true,pin:body.pin}),/Select the areas/);
+    const result=f.keypad.command(f.wall,body);
+    assert.equal(result.ok,true);assert.equal(result.action,body.action);assert.deepEqual(result.areaIds,areaIds);
+    assert.ok(result.areas.every(area=>area.activeAlarmCount===0&&area.status==='disarmed'&&!area.canResetAlarmMemory&&area.resetAlarmMemoryBlock===null));
+    const incidents=f.security.state().incidents;
+    assert.equal(incidents.length,2);assert.ok(incidents.every(incident=>incident.ackAt&&incident.resetAt));
+    assert.equal(incidents.find(incident=>incident.areaId===f.one.id).ackBy,'Prior operator');
+    assert.equal(incidents.find(incident=>incident.areaId===f.two.id).ackBy,f.operator.username);
+    const events=f.security.state().events;
+    assert.equal(events.filter(event=>event.type==='alarm_acknowledged'&&event.actor===f.operator.username).length,1);
+    assert.equal(events.filter(event=>event.type==='alarm_reset'&&event.actor===f.operator.username).length,2);
+    const after=snapshot();
+    assert.throws(()=>f.keypad.command(f.wall,body),blocked(/No alarm memory to reset/));
+    assert.deepEqual(snapshot(),after);
+  }finally{f.close();}
+});
+
+test('keypad reset rolls back every acknowledgement and reset if a later area fails',()=>{
+  const f=fixture();try{
+    const areaIds=[f.one.id,f.two.id];f.pin(f.operator,'0471',areaIds);f.arm();
+    f.security.ingest('one',{contact:false});f.security.ingest('two',{contact:false});
+    for(const id of areaIds)f.security.command(id,'disarm',{},'Fixture');
+    f.normal();
+    const snapshot=()=>({incidents:f.s.all('SELECT * FROM security_incidents ORDER BY id'),events:f.s.all('SELECT * FROM security_events ORDER BY id')});
+    const before=snapshot(),command=f.security.command.bind(f.security);
+    f.security.command=(id,action,...args)=>{
+      const result=command(id,action,...args);
+      if(id===f.two.id&&action==='reset')throw Error('Synthetic reset failure');
+      return result;
+    };
+    assert.throws(()=>f.keypad.command(f.wall,{action:'reset_alarm_memory',areaIds,pin:'0471'}),/Synthetic reset failure/);
+    assert.deepEqual(snapshot(),before);assert.equal(f.s.transactionDepth,0);
+  }finally{f.close();}
+});
+
 test('explicit mixed authorized and unauthorized areas reject the whole disarm without silently intersecting',()=>{
   const f=fixture();try{
     f.pin();f.arm();const before=f.s.all('SELECT * FROM security_areas ORDER BY id');assert.throws(()=>f.keypad.command(f.wall,{action:'disarm',areaIds:[f.one.id,f.two.id],pin:'0471'}),/does not permit/);assert.deepEqual(f.s.all('SELECT * FROM security_areas ORDER BY id'),before);
@@ -152,8 +210,9 @@ test('keypad display reports an open Home-excluded zone without changing Home pr
     f.security.saveZone({id:f.zones[0].id,homeBypass:true},'Fixture');
     f.security.saveZone({id:f.zones[1].id,areaIds:[f.one.id,f.two.id]},'Fixture');
     f.security.command(f.one.id,'arm_home',{},'Fixture');f.security.ingest('one',{contact:false});
-    const area=f.keypad.state(f.wall).areas.find(area=>area.id===f.one.id),{zoneIssues,zoneTroubleCount,canArmAway,...original}=area;
+    const area=f.keypad.state(f.wall).areas.find(area=>area.id===f.one.id),{zoneIssues,zoneTroubleCount,canArmAway,canResetAlarmMemory,resetAlarmMemoryBlock,...original}=area;
     assert.deepEqual(original,f.security.areaView(f.security.area(f.one.id)));assert.equal(area.mode,'home');assert.equal(area.status,'armed');assert.equal(area.readyHome,true);assert.equal(area.readyAway,false);assert.deepEqual(area.blockingZones,[]);assert.equal(area.zoneCount,2);assert.equal(canArmAway,false);assert.equal(zoneTroubleCount,0);
+    assert.equal(canResetAlarmMemory,false);assert.equal(resetAlarmMemoryBlock,null);
     assert.deepEqual(zoneIssues,[{id:f.zones[0].id,name:'House contact',status:'active',trouble:null,bypassed:false,manualBypassed:false,cycleBypassed:false,homeExcluded:true}]);assert.equal(f.security.activeIncidents().length,0);
   }finally{f.close();}
 });
@@ -189,7 +248,7 @@ test('display polling is read-only and keeps disarmed latched alarm memory indep
   const f=fixture();try{
     f.security.command(f.one.id,'arm_away',{},'Fixture');f.security.ingest('one',{contact:false});assert.equal(f.security.activeIncidents(f.one.id).length,1);f.security.command(f.one.id,'disarm',{},'Fixture');f.security.ingest('one',{contact:true});
     const changes=f.s.one('SELECT total_changes() n').n,before=f.s.all('SELECT * FROM security_incidents'),readings=JSON.stringify([...f.security.readings].map(([id,record])=>[id,{...record,values:[...record.values]}]));f.s.db.exec('PRAGMA query_only = ON');
-    for(let poll=0;poll<2;poll++){const area=f.keypad.state(f.wall).areas.find(area=>area.id===f.one.id);assert.equal(area.mode,'disarmed');assert.equal(area.status,'alarm');assert.equal(area.activeAlarmCount,1);assert.equal(area.readyAway,false);assert.deepEqual(area.zoneIssues,[]);assert.equal(area.zoneTroubleCount,0);}
+    for(let poll=0;poll<2;poll++){const area=f.keypad.state(f.wall).areas.find(area=>area.id===f.one.id);assert.equal(area.mode,'disarmed');assert.equal(area.status,'alarm');assert.equal(area.activeAlarmCount,1);assert.equal(area.readyAway,false);assert.deepEqual(area.zoneIssues,[]);assert.equal(area.zoneTroubleCount,0);assert.equal(area.canResetAlarmMemory,true);assert.equal(area.resetAlarmMemoryBlock,null);}
     assert.equal(f.s.one('SELECT total_changes() n').n,changes);assert.deepEqual(f.s.all('SELECT * FROM security_incidents'),before);assert.equal(JSON.stringify([...f.security.readings].map(([id,record])=>[id,{...record,values:[...record.values]}])),readings);
   }finally{f.close();}
 });
@@ -207,7 +266,13 @@ test('HTTP keypad routes preserve authentication, ownership, admin controls, ori
     const readerState=await request('keypad',undefined,wall.cookie);assert.equal(readerState.status,200);assert.equal(readerState.body.canArm,false);assert.equal(readerState.body.areas.length,2);assert.equal((await request('keypad/command',{action:'arm_away',areaIds:[f.one.id]},wall.cookie)).status,403);
     assert.equal((await request('users/keypad?id='+f.operator.id,undefined,wall.cookie)).status,403);assert.equal((await request('users/keypad',{id:f.wall.id,operation:'save',areaIds:[f.one.id]},wall.cookie)).status,403);assert.equal((await request('account/keypad',{operation:'set',pin:'1234',currentPassword:password,id:f.admin.id},operator.cookie)).status,400);
     assert.equal((await request('account/keypad',{operation:'set',pin:'1234',currentPassword:password},operator.cookie,'https://other.example.test')).status,403);
-    assert.equal((await request('keypad/command',{action:'arm_away',areaIds:[f.one.id]},operator.cookie)).status,200);assert.equal((await request('keypad/command',{action:'disarm',areaIds:[f.one.id],pin:'0471'},wall.cookie)).status,200);
+    assert.equal((await request('keypad/command',{action:'arm_away',areaIds:[f.one.id]},operator.cookie)).status,200);f.security.ingest('one',{contact:false});
+    assert.equal((await request('keypad/command',{action:'disarm',areaIds:[f.one.id],pin:'0471'},wall.cookie)).status,200);f.security.ingest('one',{contact:true});
+    const reset={action:'reset_alarm_memory',areaIds:[f.one.id],pin:'0471'};
+    assert.equal((await request('keypad/command',reset)).status,401);
+    assert.equal((await request('keypad/command',reset,wall.cookie,'https://other.example.test')).status,403);
+    const resetReply=await request('keypad/command',reset,wall.cookie);
+    assert.equal(resetReply.status,200);assert.equal(resetReply.body.action,reset.action);assert.equal(resetReply.body.areas[0].activeAlarmCount,0);
     const settings=await request('users/keypad?id='+f.operator.id,undefined,admin.cookie);assert.equal(settings.body.pinSet,true);for(const secret of ['lookup_tag','salt','hash','0471'])assert.equal(JSON.stringify(settings.body).includes(secret),false);
     for(let i=0;i<5;i++)assert.equal((await request('keypad/command',{action:'disarm',all:true,pin:'9998'},wall.cookie)).status,403);const blocked=await request('keypad/command',{action:'disarm',all:true,pin:'0471'},wall.cookie);assert.equal(blocked.status,429);assert.equal(blocked.retry,'60');assert.equal(JSON.stringify(blocked.body).includes('0471'),false);
   }finally{server?.closeAllConnections();if(server)await new Promise(resolve=>server.close(resolve));f.close();}

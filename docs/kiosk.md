@@ -13,19 +13,24 @@ Touch the keypad once after opening it to allow audio; the tablet's volume and
 output settings still apply. Sound does not replay old events after reconnection.
 
 **Arm away** does not require a PIN. Existing zone readiness checks still apply.
-An administrator can separately enable **Allow bypass and arm**, which starts
-off. This enables **Force Arm**, which reviews open zones to bypass and keeps
-zones waiting for a fresh report protected. A fresh active report can raise
-an alarm after arming. Offline or faulty zones still block Force Arm. The
-separate **Bypass and arm** flow has an optional reason and one confirmation.
-Each selected area must retain at least one protected zone. The bypass lasts until that area is
-disarmed and does not bypass a shared detector in other areas. The kiosk keeps
-the bypassed zone names visible, including after their sensors return to normal.
-Disarming requires a personal four-digit PIN belonging to an enabled user with
-Security control permission. The requested areas must be permitted to both
+An administrator can enable **Allow bypass and arm** to make **Bypass** and
+**Force Arm** available. **Bypass** selects one blocking zone for the next arm.
+**Force Arm** also includes open or active zones in its confirmation. Zones
+waiting for a fresh report stay protected unless individually bypassed. Offline
+or faulty zones must be resolved or individually bypassed before arming.
+Each selected area must retain at least one protected zone. The bypass lasts
+until that area is disarmed and does not bypass a shared detector outside the
+selected areas. The kiosk keeps the bypassed zone names visible, including after their
+sensors return to normal.
+
+Disarming and resetting require a personal four-digit PIN belonging to an
+enabled user with Security control permission. The requested areas must be permitted to both
 the kiosk and that PIN owner. **Disarm all permitted** covers the intersection
 of those two sets; it does not control hidden or unassigned areas. PIN failures
 use the same persistent retry limit as the signed-in keypad.
+**Reset** lights red when a selected area has alarm memory. Disarm the area and
+restore its zones before resetting it. The button is grey when no selected
+area needs a reset.
 
 ## Setup
 
@@ -46,8 +51,8 @@ use the same persistent retry limit as the signed-in keypad.
 PINs are set through **My account & app → Keypad PIN**, or **Users → Keypad
 access** for an administrator. A kiosk does not store the entered PIN or exchange
 it for a dashboard session. Area access, account status and PIN validity are
-checked for each disarm command. Disabling the kiosk takes effect on subsequent
-requests, including tablets that already have the page open.
+checked for each disarm or reset command. Disabling the kiosk takes effect on
+subsequent requests, including tablets that already have the page open.
 
 ## Local access boundary
 
@@ -60,9 +65,9 @@ origin and use JSON.
 
 Everyone who can access the enabled kiosk from those networks can see the
 selected area and zone status and arm those areas. The PIN remains required
-to disarm. If **Allow bypass and arm** is enabled, those people can also confirm
-the temporary exclusion of blocking zones. Choose the kiosk networks, displayed
-areas and bypass permission accordingly. Remote
+to disarm or reset. If **Allow bypass and arm** is enabled, those people can
+also confirm the temporary exclusion of blocking zones. Choose the kiosk networks,
+displayed areas and bypass permission accordingly. Remote
 access continues through the normal authenticated dashboard; `/kiosk` is not
 available through that remote route.
 

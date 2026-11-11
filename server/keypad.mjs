@@ -3,11 +3,28 @@ import {hasPermission} from './accounts.mjs';
 
 const OPTIONS={N:32768,r:8,p:1,maxmem:64*1024*1024};
 const PREPARE_ACTIONS=new Map([['prepare_arm_away','arm_away'],['prepare_force_arm_away','force_arm_away']]);
-const COMMAND_ACTIONS=new Set(['arm_away','force_arm_away','disarm',...PREPARE_ACTIONS.keys()]);
+const RESET_ALARM_MEMORY='reset_alarm_memory';
+const PIN_ACTIONS=new Set(['disarm',RESET_ALARM_MEMORY]);
+const COMMAND_ACTIONS=new Set(['arm_away','force_arm_away',...PIN_ACTIONS,...PREPARE_ACTIONS.keys()]);
 const FORCE_ARM_REASON='Force Arm: bypass known open zones';
+const FORCE_ARM_SELECTED_REASON='Force Arm: bypass reviewed selected zones and known open zones';
 const DEFAULT_BYPASS_REASON='Bypass and arm: reviewed blocking zones';
 const allowed=(condition,message,statusCode=400)=>{if(!condition)throw new KeypadError(message,statusCode);};
 const keys=(input,names)=>{allowed(input&&typeof input==='object'&&!Array.isArray(input),'Provide keypad fields');allowed(Object.keys(input).every(name=>names.includes(name)),'Unknown keypad field');return input;};
+function requestedBypassZones(body){
+  const ids=body.bypassZoneIds;
+  if(ids===undefined)return null;
+  allowed(PREPARE_ACTIONS.has(body.action)&&Array.isArray(body.areaIds)&&body.all!==true,'Select bypass zones only when reviewing an explicit area selection');
+  allowed(Array.isArray(ids)&&ids.length>0&&ids.length<=1024&&ids.every(id=>typeof id==='string'&&id.length>0&&id.length<=128)&&new Set(ids).size===ids.length,'Choose valid bypass zones without duplicates');
+  return [...ids].sort();
+}
+
+function alarmMemoryBlock(area,zoneIssues){
+  if(!area.activeAlarmCount)return null;
+  if(area.mode!=='disarmed'||area.targetMode||area.entryAt!=null||area.exitAt!=null)return 'Disarm '+area.name+' before resetting alarm memory.';
+  if(zoneIssues.length)return 'Restore open or troubled zones in '+area.name+' before resetting alarm memory.';
+  return null;
+}
 
 export class KeypadError extends Error{
   constructor(message,statusCode=400,retryAfter=0){super(message);this.statusCode=statusCode;this.retryAfter=retryAfter;}
@@ -49,7 +66,9 @@ export class Keypad{
       const raw=view.bypassed?this.security.zoneView({...zone,bypassAt:null,bypassUntil:null},{...area,cycleBypass:null},'away',readingTimeoutMin):view;
       return [{id:zone.id,name:zone.name,status:raw.status,trouble:view.trouble,bypassed:view.bypassed,manualBypassed:view.manualBypassed,cycleBypassed:view.cycleBypassed,homeExcluded:(area.targetMode||area.mode)==='home'&&zone.homeBypass}];
     });
-    return {...this.security.areaView(area,readingTimeoutMin),zoneIssues,zoneTroubleCount:zoneIssues.filter(zone=>zone.status==='trouble'||zone.status==='unknown').length};
+    const view=this.security.areaView(area,readingTimeoutMin),resetAlarmMemoryBlock=alarmMemoryBlock(view,zoneIssues);
+    return {...view,zoneIssues,zoneTroubleCount:zoneIssues.filter(zone=>zone.status==='trouble'||zone.status==='unknown').length,
+      canResetAlarmMemory:view.activeAlarmCount>0&&resetAlarmMemoryBlock===null,resetAlarmMemoryBlock};
   }
   state(sessionUser){
     if(this.security.demo&&!this.accounts.active()){
@@ -64,21 +83,24 @@ export class Keypad{
   userBinding(user){return 'user:'+user.id+':'+user.authVersion;}
   armingConfig(areaIds,readingTimeoutMin=this.security.readingTimeoutMin()){const ids=new Set(areaIds);return {readingTimeoutMin,areas:[...areaIds].sort().map(id=>this.security.requireArea(id)),zones:this.security.zones().filter(zone=>zone.areaIds.some(id=>ids.has(id))),schedules:this.security.schedules().filter(schedule=>ids.has(schedule.areaId))};}
   armingRevision(areaIds,binding,readingTimeoutMin){return this.mac('arming-revision\0'+this.previewEpoch+'\0'+binding+'\0'+JSON.stringify(this.armingConfig(areaIds,readingTimeoutMin)));}
-  bypassPlan(areaIds,action='arm_away'){
+  bypassPlan(areaIds,action='arm_away',selectedZoneIds=null){
     const readingTimeoutMin=this.security.readingTimeoutMin();
+    const openOnly=action==='force_arm_away',matchedZones=new Set();
     const areas=[...areaIds].sort().map(id=>{
       const area=this.security.requireArea(id),ready=this.security.readiness(area,'away',readingTimeoutMin);allowed(area.enabled,'This security area is disabled');allowed(area.mode==='disarmed'&&!area.targetMode,'Disarm '+area.name+' before arming it again');allowed(!ready.activeAlarmCount,'Reset alarm memory before arming this area');allowed(ready.zoneCount>0,'Add an enabled zone before arming this area');
-      const {bypassZones,awaitingZones}=action==='force_arm_away'?this.security.forceArmBlockers(area,ready):{bypassZones:ready.blockingZones,awaitingZones:[]};
+      const {bypassZones,awaitingZones}=this.security.cycleArmingPlan(area,ready,{openOnly,selectedZoneIds});
+      for(const zone of bypassZones)matchedZones.add(zone.id);
       const protectedZoneCount=ready.includedCount-bypassZones.length;allowed(protectedZoneCount>0,'At least one included, ready or awaiting zone must remain protected in '+area.name);
       return {id:area.id,name:area.name,blockingZones:bypassZones.map(({id,name,status,trouble})=>({id,name,status,trouble})),awaitingZones,protectedZoneCount};
     });
+    allowed(!selectedZoneIds||selectedZoneIds.every(id=>matchedZones.has(id)),'A selected zone no longer blocks any selected area; review the zones again');
     const config=this.armingConfig(areaIds,readingTimeoutMin),conditions=config.zones.map(zone=>({id:zone.id,areas:zone.areaIds.filter(id=>areaIds.includes(id)).map(id=>{const view=this.security.zoneView(zone,this.security.requireArea(id),'away',readingTimeoutMin);return {id,known:view.known,active:view.active,status:view.status,trouble:view.trouble,awaitingReading:view.awaitingReading};})}));
-    return {areas,signature:this.mac('arming-plan\0'+JSON.stringify({action,config,conditions}))};
+    return {areas,signature:this.mac('arming-plan\0'+JSON.stringify({action,selectedZoneIds,config,conditions}))};
   }
-  prepareBypass(areaIds,binding,prepareAction='prepare_arm_away'){
-    const action=PREPARE_ACTIONS.get(prepareAction),plan=this.bypassPlan(areaIds,action);allowed(plan.areas.some(area=>area.blockingZones.length||area.awaitingZones.length),'These areas are ready; use Arm away');
+  prepareBypass(areaIds,binding,prepareAction='prepare_arm_away',selectedZoneIds=null){
+    const action=PREPARE_ACTIONS.get(prepareAction),plan=this.bypassPlan(areaIds,action,selectedZoneIds);allowed(plan.areas.some(area=>area.blockingZones.length||area.awaitingZones.length),'These areas are ready; use Arm away');
     for(const [token,value] of this.armPreviews)if(value.expiresAt<=this.now()||value.binding===binding)this.armPreviews.delete(token);allowed(this.armPreviews.size<256,'Too many arming previews. Try again later.',429);
-    const token=crypto.randomBytes(32).toString('hex'),expiresAt=this.now()+120000;this.armPreviews.set(token,{action,binding,areaIds:[...areaIds].sort(),signature:plan.signature,expiresAt});return {ok:true,action:prepareAction,preview:{token,expiresAt,areas:plan.areas}};
+    const token=crypto.randomBytes(32).toString('hex'),expiresAt=this.now()+120000;this.armPreviews.set(token,{action,binding,areaIds:[...areaIds].sort(),selectedZoneIds,signature:plan.signature,expiresAt});return {ok:true,action:prepareAction,preview:{token,expiresAt,areas:plan.areas}};
   }
   confirmBypass(areaIds,bypass,binding,actor,checkCaller,action='arm_away'){
     const openOnly=action==='force_arm_away';
@@ -87,10 +109,10 @@ export class Keypad{
     const preview=this.armPreviews.get(body.token);allowed(preview&&preview.binding===binding,'Arming preview expired or changed; review the bypass list again');this.armPreviews.delete(body.token);
     allowed(preview.action===action&&preview.expiresAt>this.now()&&JSON.stringify(preview.areaIds)===JSON.stringify([...areaIds].sort()),'Arming preview expired or changed; review the bypass list again');
     if(!openOnly&&body.reason!==undefined)allowed(typeof body.reason==='string'&&body.reason.trim().length<=300&&!/[\u0000-\u001f\u007f]/.test(body.reason),'Bypass reason must be a single line of up to 300 characters');
-    const reason=openOnly?FORCE_ARM_REASON:body.reason?.trim()||DEFAULT_BYPASS_REASON;
+    const reason=openOnly?(preview.selectedZoneIds?FORCE_ARM_SELECTED_REASON:FORCE_ARM_REASON):body.reason?.trim()||DEFAULT_BYPASS_REASON;
     const results=this.s.transaction(()=>{
-      checkCaller();const plan=this.bypassPlan(areaIds,action);allowed(plan.signature===preview.signature,'Conditions changed; review the bypass list again');
-      return plan.areas.map(area=>this.security.armWithCycleBypass(area.id,area.blockingZones.map(zone=>zone.id),reason,actor,{openOnly,awaitingZoneIds:area.awaitingZones.map(zone=>zone.id)}));
+      checkCaller();const plan=this.bypassPlan(areaIds,action,preview.selectedZoneIds);allowed(plan.signature===preview.signature,'Conditions changed; review the bypass list again');
+      return plan.areas.map(area=>this.security.armWithCycleBypass(area.id,area.blockingZones.map(zone=>zone.id),reason,actor,{openOnly,selectedZoneIds:preview.selectedZoneIds,awaitingZoneIds:area.awaitingZones.map(zone=>zone.id)}));
     });return {ok:true,action,areaIds:results.map(area=>area.id),areas:results};
   }
   checkThrottle(scope){
@@ -133,23 +155,43 @@ export class Keypad{
       this.security.event('keypad_user_settings_changed','Keypad settings updated for '+user.username,{actor:actor.username});
     });return this.settings(user.id,{admin:true});
   }
-  rejected(sessionUser){this.failed('pin');this.security.event('keypad_pin_rejected','Keypad disarm attempt rejected',{actor:sessionUser.username});throw new KeypadError('PIN is invalid or does not permit the selected areas',403);}
+  rejected(sessionUser,action){
+    this.failed('pin');
+    const operation=action===RESET_ALARM_MEMORY?'alarm memory reset':'disarm';
+    this.security.event('keypad_pin_rejected','Keypad '+operation+' attempt rejected',{actor:sessionUser.username});
+    throw new KeypadError('PIN is invalid or does not permit the selected areas',403);
+  }
   pinUser(pin){
     const valid=typeof pin==='string'&&/^\d{4}$/.test(pin),found=valid?this.s.one('SELECT * FROM security_keypad_pins WHERE lookup_tag=?',this.tag(pin)):null,row=found&&/^[a-f0-9]{32}$/.test(found.salt)&&/^[a-f0-9]{64}$/.test(found.hash)?found:null;
     const candidate=this.derive(valid?pin:'invalid-pin',row?.salt||this.dummySalt),expected=row?.hash||this.dummyHash;
     const matched=crypto.timingSafeEqual(Buffer.from(candidate,'hex'),Buffer.from(expected,'hex'));
     return matched&&row?this.freshUser(row.user_id):null;
   }
+  #resetAlarmMemory(areaIds,actor){
+    const readingTimeoutMin=this.security.readingTimeoutMin();
+    for(const id of areaIds){
+      const area=this.displayArea(this.security.requireArea(id),readingTimeoutMin);
+      allowed(area.canResetAlarmMemory,area.resetAlarmMemoryBlock||'No alarm memory to reset in '+area.name+'.',409);
+    }
+    for(const id of areaIds){
+      if(this.security.activeIncidents(id).some(incident=>incident.ackAt===null))this.security.command(id,'acknowledge',{},actor);
+      this.security.command(id,'reset',{},actor);
+    }
+    return areaIds.map(id=>this.displayArea(this.security.requireArea(id),readingTimeoutMin));
+  }
   kioskCommand(input,scope,{allowBypassArming=false,binding='',checkBypass=()=>{}}={}){
-    const body=keys(input,['action','areaIds','all','pin','bypass']),scopeIds=this.validateAreas(scope),scopeSet=new Set(scopeIds);
-    allowed(COMMAND_ACTIONS.has(body.action),'Choose an arming or disarm command');allowed(body.all===undefined||typeof body.all==='boolean','All areas must be on or off');allowed(!(body.all===true&&body.areaIds!==undefined),'Choose selected areas or all areas');
+    const body=keys(input,['action','areaIds','all','pin','bypass','bypassZoneIds']),scopeIds=this.validateAreas(scope),scopeSet=new Set(scopeIds);
+    const selectedZoneIds=requestedBypassZones(body);
+    allowed(COMMAND_ACTIONS.has(body.action),'Choose a keypad command');allowed(body.all===undefined||typeof body.all==='boolean','All areas must be on or off');allowed(!(body.all===true&&body.areaIds!==undefined),'Choose selected areas or all areas');
+    const pinRequired=PIN_ACTIONS.has(body.action);
+    if(body.action===RESET_ALARM_MEMORY)allowed(body.all!==true,'Select the areas whose alarm memory you want to reset');
     const explicit=body.all===true?null:this.validateAreas(body.areaIds);if(explicit)allowed(explicit.length>0,'Select at least one area');let actor=null,areaIds=explicit;
-    if(body.action!=='disarm'){
+    if(!pinRequired){
       allowed(body.pin===undefined,'Arming does not require a PIN');if(body.all===true)areaIds=scopeIds;allowed(areaIds.every(id=>scopeSet.has(id)),'Choose only areas available on this kiosk',403);
     }else{
-      allowed(body.bypass===undefined,'Disarming does not accept a bypass');
-      this.checkThrottle('pin');actor=this.pinUser(body.pin);if(!hasPermission(actor,'controlSecurity'))return this.rejected({username:'Local kiosk'});
-      const assigned=this.areaIds(actor);if(body.all===true)areaIds=assigned.filter(id=>scopeSet.has(id));if(!areaIds?.length||areaIds.some(id=>!scopeSet.has(id)||!assigned.includes(id)))return this.rejected({username:'Local kiosk'});
+      allowed(body.bypass===undefined,body.action===RESET_ALARM_MEMORY?'Resetting alarm memory does not accept a bypass':'Disarming does not accept a bypass');
+      this.checkThrottle('pin');actor=this.pinUser(body.pin);if(!hasPermission(actor,'controlSecurity'))return this.rejected({username:'Local kiosk'},body.action);
+      const assigned=this.areaIds(actor);if(body.all===true)areaIds=assigned.filter(id=>scopeSet.has(id));if(!areaIds?.length||areaIds.some(id=>!scopeSet.has(id)||!assigned.includes(id)))return this.rejected({username:'Local kiosk'},body.action);
     }
     allowed(areaIds?.length>0,'No areas are available');
     const preparing=PREPARE_ACTIONS.has(body.action);
@@ -157,7 +199,7 @@ export class Keypad{
       allowed(allowBypassArming&&typeof binding==='string'&&binding.startsWith('kiosk:'),'Bypass arming is not enabled for this kiosk',403);
       if(preparing){
         allowed(body.bypass===undefined,'Request a new bypass preview');checkBypass(areaIds);
-        return this.prepareBypass(areaIds,binding,body.action);
+        return this.prepareBypass(areaIds,binding,body.action,selectedZoneIds);
       }
       return this.confirmBypass(areaIds,body.bypass,binding,'Local kiosk',()=>{
         allowed(allowBypassArming&&areaIds.every(id=>scopeSet.has(id)),'Kiosk permissions changed',403);checkBypass(areaIds);
@@ -166,28 +208,32 @@ export class Keypad{
     const areas=areaIds.map(id=>this.security.requireArea(id));
     if(body.action==='arm_away')for(const area of areas){const ready=this.security.readiness(area,'away');allowed(area.mode==='disarmed'&&!area.targetMode,'Disarm '+area.name+' before arming it again');allowed(ready.ready,'Area not ready: '+area.name);}
     const results=this.s.transaction(()=>{
-      if(body.action==='disarm'){const current=this.freshUser(actor.id),assigned=this.areaIds(current);if(!hasPermission(current,'controlSecurity')||areaIds.some(id=>!assigned.includes(id)))throw new KeypadError('PIN is invalid or does not permit the selected areas',403);}
+      if(pinRequired){const current=this.freshUser(actor.id),assigned=this.areaIds(current);if(!hasPermission(current,'controlSecurity')||areaIds.some(id=>!assigned.includes(id)))throw new KeypadError('PIN is invalid or does not permit the selected areas',403);}
+      if(body.action===RESET_ALARM_MEMORY)return this.#resetAlarmMemory(areaIds,actor.username);
       return areaIds.map(id=>this.security.command(id,body.action,{reason:'Local kiosk'},actor?.username||'Local kiosk'));
     });return {ok:true,action:body.action,areaIds,areas:results};
   }
   command(sessionUser,input){
-    const body=keys(input,['action','areaIds','all','pin','bypass']),session=this.freshUser(sessionUser.id);allowed(hasPermission(session,'viewSecurity'),'Security access is required',403);allowed(COMMAND_ACTIONS.has(body.action),'Choose an arming or disarm command');
+    const body=keys(input,['action','areaIds','all','pin','bypass','bypassZoneIds']),session=this.freshUser(sessionUser.id);allowed(hasPermission(session,'viewSecurity'),'Security access is required',403);allowed(COMMAND_ACTIONS.has(body.action),'Choose a keypad command');
+    const selectedZoneIds=requestedBypassZones(body);
     allowed(body.all===undefined||typeof body.all==='boolean','All areas must be on or off');allowed(!(body.all===true&&body.areaIds!==undefined),'Choose selected areas or all areas');
+    const pinRequired=PIN_ACTIONS.has(body.action);
+    if(body.action===RESET_ALARM_MEMORY)allowed(body.all!==true,'Select the areas whose alarm memory you want to reset');
     const explicit=body.all===true?null:this.validateAreas(body.areaIds);if(explicit)allowed(explicit.length>0,'Select at least one area');
     let actor=session,areaIds=explicit;
-    if(body.action!=='disarm'){
+    if(!pinRequired){
       allowed(hasPermission(session,'controlSecurity'),'Security control access is required',403);allowed(body.pin===undefined,'Arming does not require a PIN');if(body.all===true)areaIds=this.security.areas().map(area=>area.id);
     }else{
-      allowed(body.bypass===undefined,'Disarming does not accept a bypass');
+      allowed(body.bypass===undefined,body.action===RESET_ALARM_MEMORY?'Resetting alarm memory does not accept a bypass':'Disarming does not accept a bypass');
       this.checkThrottle('pin');actor=this.pinUser(body.pin);
-      if(!hasPermission(actor,'controlSecurity'))return this.rejected(session);
+      if(!hasPermission(actor,'controlSecurity'))return this.rejected(session,body.action);
       const authorized=this.areaIds(actor);if(body.all===true)areaIds=authorized;
-      if(!areaIds?.length||areaIds.some(id=>!authorized.includes(id)))return this.rejected(session);
+      if(!areaIds?.length||areaIds.some(id=>!authorized.includes(id)))return this.rejected(session,body.action);
     }
     allowed(areaIds?.length>0,'No areas are available');
     if(PREPARE_ACTIONS.has(body.action)){
       allowed(body.bypass===undefined,'Request a new bypass preview');
-      return this.prepareBypass(areaIds,this.userBinding(session),body.action);
+      return this.prepareBypass(areaIds,this.userBinding(session),body.action,selectedZoneIds);
     }
     if(body.action==='force_arm_away'||body.bypass!==undefined){
       return this.confirmBypass(areaIds,body.bypass,this.userBinding(session),session.username,()=>{
@@ -198,7 +244,8 @@ export class Keypad{
     if(body.action==='arm_away')for(const area of areas){const ready=this.security.readiness(area,'away');allowed(area.mode==='disarmed'&&!area.targetMode,'Disarm '+area.name+' before arming it again');allowed(ready.ready,'Area not ready: '+area.name);}
     const results=this.s.transaction(()=>{
       const currentSession=this.freshUser(session.id);allowed(hasPermission(currentSession,body.action==='arm_away'?'controlSecurity':'viewSecurity'),'Your session permissions changed',403);
-      if(body.action==='disarm'){const currentActor=this.freshUser(actor.id),authorized=this.areaIds(currentActor);if(!hasPermission(currentActor,'controlSecurity')||areaIds.some(id=>!authorized.includes(id)))throw new KeypadError('PIN is invalid or does not permit the selected areas',403);}
+      if(pinRequired){const currentActor=this.freshUser(actor.id),authorized=this.areaIds(currentActor);if(!hasPermission(currentActor,'controlSecurity')||areaIds.some(id=>!authorized.includes(id)))throw new KeypadError('PIN is invalid or does not permit the selected areas',403);}
+      if(body.action===RESET_ALARM_MEMORY)return this.#resetAlarmMemory(areaIds,actor.username);
       const result=areaIds.map(id=>this.security.command(id,body.action,{reason:'Keypad via signed-in user '+session.username},actor.username));
       // A valid low-scope PIN cannot reset the shared guessing budget for other
       // users' PINs. Failures decay only after a quiet thirty-minute interval.
