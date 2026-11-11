@@ -5,6 +5,8 @@ const DAY=86400000,MINUTE=60000,MAX_PROPERTIES=128;
 const READING_TIMEOUT_KEY='securityReadingTimeoutMin',DEFAULT_READING_TIMEOUT=10080,MAX_READING_TIMEOUT=43200;
 const MODES=['disarmed','away','home'];
 const OPERATORS=['eq','ne','gt','gte','lt','lte'];
+const alwaysActive=zone=>zone.type==='24hour';
+const momentaryAction=zone=>alwaysActive(zone)&&zone.property==='action'&&zone.operator==='eq'&&typeof zone.value==='string'&&zone.value.trim().length>0;
 const uid=()=>crypto.randomUUID();
 const parse=raw=>raw?JSON.parse(raw):null;
 const own=(value,key)=>Object.hasOwn(value,key);
@@ -126,7 +128,7 @@ export class SecurityEngine {
     this.s.transaction(()=>{this.#pinReadingTimeoutBeforeRemoval(linked.filter(zone=>zone.areaIds.length===1));this.event('area_removed',area.name+' removed; its audit history is retained',{areaId:id,actor});for(const zone of linked){const areaIds=zone.areaIds.filter(member=>member!==id);this.s.run('DELETE FROM security_zone_areas WHERE zone_id=? AND area_id=?',zone.id,id);if(areaIds.length){const next={...zone,areaId:areaIds[0],areaIds};this.s.run('UPDATE security_zones SET area_id=?,json=? WHERE id=?',next.areaId,JSON.stringify(next),zone.id);}else{this.s.run('DELETE FROM security_zones WHERE id=?',zone.id);this.edges.delete(zone.id);}}for(const table of ['security_schedules','security_actions'])this.s.run('DELETE FROM '+table+' WHERE area_id=?',id);this._suppressArea(id,'Area removed');this.s.run('DELETE FROM security_areas WHERE id=?',id);});
   }
   saveZone(input,actor='System'){
-    const body=object(input,['id','areaId','areaIds','deviceId','name','property','operator','value','type','homeBypass','enabled','freshnessMin']);
+    const body=object(input,['id','areaId','areaIds','deviceId','name','property','operator','value','type','homeBypass','silent','enabled','freshnessMin']);
     // Older clients may submit this field. Preserve the stored legacy baseline.
     if(body.freshnessMin!=null)integer(body.freshnessMin,1,MAX_READING_TIMEOUT,'zone reporting timeout');
     const old=body.id?this.zone(identifier(body.id,'zone')):null;requireValue(!body.id||old,'Security zone not found');
@@ -144,7 +146,13 @@ export class SecurityEngine {
     const zone={...(old||{id:uid(),bypassAt:null,bypassUntil:null,bypassReason:'',createdAt:this.now()}),areaId:area.id,areaIds,deviceId:device.id,name:text(body.name??old?.name??device.name,'Zone name'),property:property(body.property??old?.property),operator:body.operator??old?.operator??'eq',value:own(body,'value')?body.value:old?.value,type:body.type??old?.type??'instant',homeBypass:bool(body.homeBypass??old?.homeBypass??false,'Home exclusion'),enabled:bool(body.enabled??old?.enabled??true,'zone enabled state'),updatedAt:this.now()};
     requireValue(OPERATORS.includes(zone.operator)&&scalar(zone.value),'Choose a valid operator and scalar trigger value');
     requireValue(['eq','ne'].includes(zone.operator)||typeof zone.value==='number','Numeric comparisons require a numeric trigger value');
-    requireValue(['instant','entry'].includes(zone.type),'Choose an instant or entry zone');
+    requireValue(['instant','entry','24hour'].includes(zone.type),'Choose an instant, entry, or 24-hour zone');
+    if(own(body,'silent'))bool(body.silent,'Silent alarm');
+    if(alwaysActive(zone)){
+      requireValue(body.homeBypass!==true,'24-hour zones cannot be bypassed in Home mode');
+      requireValue(zone.property!=='action'||momentaryAction(zone),'24-hour action buttons require an exact, nonempty text value');
+      Object.assign(zone,{silent:body.silent??(old?.silent===true),homeBypass:false,bypassAt:null,bypassUntil:null,bypassReason:''});
+    }else delete zone.silent;
     requireValue(this.zones().every(z=>z.id===zone.id||!z.areaIds.some(id=>areaIds.includes(id))||z.deviceId!==device.id||z.property!==zone.property),'This device property is already a zone in a selected area');
     requireValue(new Set([...this.zones().filter(z=>z.deviceId===device.id&&z.id!==zone.id).map(z=>z.property),zone.property]).size<=MAX_PROPERTIES,'At most 128 detector properties can be configured per device');
     requireValue(old||this.zones().length<1024,'At most 1024 security zones are supported');
@@ -190,12 +198,12 @@ export class SecurityEngine {
     this.s.transaction(()=>{this.s.run('INSERT INTO security_actions VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET area_id=excluded.area_id,json=excluded.json',action.id,action.areaId,JSON.stringify(action));this.event(old?'action_updated':'action_created',action.name+' '+(action.enabled?'enabled':'saved disabled'),{areaId:area.id,actor});});return action;
   }
   removeAction(id,actor='System'){const action=this.action(id);requireValue(action,'Security action not found');this.editable(this.requireArea(action.areaId));this.s.transaction(()=>{this.s.run('DELETE FROM security_actions WHERE id=?',id);this.s.run("UPDATE security_deliveries SET status='suppressed',error='Action removed',finished_at=? WHERE action_id=? AND status='queued'",this.now(),id);this.s.run("UPDATE security_push_deliveries SET status='suppressed',error='Action removed',finished_at=? WHERE action_id=? AND status='queued'",this.now(),id);this.event('action_removed',action.name+' removed',{areaId:action.areaId,actor});});}
-  isBypassed(zone){return zone.bypassAt!==null&&zone.bypassAt!==undefined&&(zone.bypassUntil===null||zone.bypassUntil>this.now());}
+  isBypassed(zone){return !alwaysActive(zone)&&zone.bypassAt!==null&&zone.bypassAt!==undefined&&(zone.bypassUntil===null||zone.bypassUntil>this.now());}
   cycleBypassIds(area){
     const bypass=area?.cycleBypass;
     return area?.cycleId&&(area.mode!=='disarmed'||area.targetMode)&&bypass?.cycleId===area.cycleId&&Array.isArray(bypass.zoneIds)?bypass.zoneIds:[];
   }
-  isCycleBypassed(zone,area){return this.cycleBypassIds(area).includes(zone.id);}
+  isCycleBypassed(zone,area){return !alwaysActive(zone)&&this.cycleBypassIds(area).includes(zone.id);}
   cycleAwaitingIds(area){
     const waiting=area?.cycleAwaiting;
     return area?.cycleId&&(area.mode!=='disarmed'||area.targetMode)&&waiting?.cycleId===area.cycleId
@@ -212,6 +220,7 @@ export class SecurityEngine {
   clearCycleExceptions(area){const {cycleBypass,cycleAwaiting,...rest}=area;return rest;}
   bypassZone(id,options,actor='System'){
     const zone=this.zone(id);requireValue(zone,'Security zone not found');const body=object(options,['durationMin','reason']);
+    requireValue(!alwaysActive(zone),'24-hour zones cannot be bypassed');
     const reason=text(body.reason,'Bypass reason',300),duration=body.durationMin===null?null:integer(body.durationMin,1,525600,'bypass duration');
     zone.bypassAt=this.now();zone.bypassUntil=duration===null?null:this.now()+duration*MINUTE;zone.bypassReason=reason;
     this.s.transaction(()=>{this.s.run('UPDATE security_zones SET json=? WHERE id=?',JSON.stringify(zone),id);for(const areaId of zone.areaIds){const area=this.requireArea(areaId);if(area.pendingZoneId===id)this._saveArea({...area,entryAt:null,pendingZoneId:null});this.event('zone_bypassed',zone.name+' bypassed in all assigned areas: '+reason,{areaId,zoneId:id,actor});}});return this.zoneState(zone);
@@ -222,22 +231,27 @@ export class SecurityEngine {
   zoneView(zone,area=this.area(zone.areaId),mode=area?.targetMode||area?.mode||'disarmed',readingTimeoutMin=this.readingTimeoutMin()){
     const d=this.s.device(zone.deviceId),{network,available}=this._source(d),record=this.readings.get(zone.deviceId),reading=record?.values.get(zone.property),epoch=network?.connectedAt||0;
     const currentReading=record?.epoch===epoch&&reading,validReading=!!currentReading&&scalar(currentReading.value)&&typeof currentReading.value===typeof zone.value;
-    const known=available&&validReading&&reading.at>=epoch&&this.now()-reading.at<=readingTimeoutMin*MINUTE;
+    const fresh=available&&validReading&&reading.at>=epoch&&this.now()-reading.at<=readingTimeoutMin*MINUTE;
+    const momentary=momentaryAction(zone),known=momentary?available:fresh;
     const awaitingReading=available&&!known&&(!currentReading||validReading);
     const cycleAwaiting=this.cycleAwaitingIds(area).includes(zone.id);
     const awaitingProtected=cycleAwaiting&&(awaitingReading||known&&!this.#isFreshCycleReading(area,reading));
     const cycleReady=awaitingProtected||cycleAwaiting&&!!area.targetMode&&known;
-    const active=known?compare(reading.value,zone.operator,zone.value):null,manualBypassed=this.isBypassed(zone),cycleBypassed=this.isCycleBypassed(zone,area),bypassed=manualBypassed||cycleBypassed,homeExcluded=mode==='home'&&zone.homeBypass;
+    const active=known?!momentary&&compare(reading.value,zone.operator,zone.value):null,manualBypassed=this.isBypassed(zone),cycleBypassed=this.isCycleBypassed(zone,area),bypassed=manualBypassed||cycleBypassed,homeExcluded=!alwaysActive(zone)&&mode==='home'&&zone.homeBypass;
     let trouble=null;if(!d)trouble='Device missing';else if(d.retiredAt)trouble='Device retired';else if(d.disabled)trouble='Device disabled';else if(d.inventoryPresent===false)trouble='Missing from Zigbee inventory';else if(d.availability==='offline')trouble='Device offline';else if(!network?.enabled)trouble='Broker disabled or missing';else if(!network.connected)trouble='Broker offline';else if(network.mode==='mqtt')trouble='A Zigbee2MQTT device is required';else if(network.bridgeState!=='online')trouble='Zigbee bridge unavailable';else if(!known)trouble=reading&&record?.epoch===epoch?scalar(reading.value)&&typeof reading.value===typeof zone.value?'Zone reading is stale':'Sensor property is unavailable or has an unexpected type':'Awaiting a fresh sensor report';
-    return {...zone,freshnessMin:readingTimeoutMin,deviceName:d?.name||'Missing device',networkId:d?.networkId||null,networkLabel:network?.label||'Missing broker',observedValue:known?reading.value:null,lastReportAt:known?reading.at:null,known:!!known,active,status:!zone.enabled?'disabled':bypassed||homeExcluded?'bypassed':!available?'trouble':!known?'unknown':active?'active':'normal',bypassed,manualBypassed,cycleBypassed,homeExcluded,trouble,awaitingReading,awaitingProtected,ready:!zone.enabled||bypassed||homeExcluded||cycleReady||known&&!active};
+    return {...zone,silent:alwaysActive(zone)&&zone.silent===true,freshnessMin:readingTimeoutMin,deviceName:d?.name||'Missing device',networkId:d?.networkId||null,networkLabel:network?.label||'Missing broker',observedValue:fresh?reading.value:null,lastReportAt:fresh?reading.at:null,known:!!known,active,status:!zone.enabled?'disabled':bypassed||homeExcluded?'bypassed':!available?'trouble':!known?'unknown':active?'active':'normal',bypassed,manualBypassed,cycleBypassed,homeExcluded,trouble,awaitingReading,awaitingProtected,ready:!zone.enabled||bypassed||homeExcluded||cycleReady||known&&!active};
   }
   zoneState(zone,readingTimeoutMin=this.readingTimeoutMin()){const views=zone.areaIds.map(id=>this.area(id)).filter(Boolean).map(area=>{const view=this.zoneView(zone,area,undefined,readingTimeoutMin);return {areaId:area.id,areaName:area.name,mode:area.mode,targetMode:area.targetMode,status:view.status,homeExcluded:view.homeExcluded,ready:view.ready,bypassed:view.bypassed,manualBypassed:view.manualBypassed,cycleBypassed:view.cycleBypassed,known:view.known,active:view.active,trouble:view.trouble};});return {...this.zoneView(zone,undefined,undefined,readingTimeoutMin),areaStates:views};}
   activeIncidents(areaId){return this.s.all('SELECT * FROM security_incidents WHERE reset_at IS NULL'+(areaId?' AND area_id=?':'')+' ORDER BY raised_at DESC',...(areaId?[areaId]:[])).map(row=>this.incidentView(row));}
   incidentView(row){return {...parse(row.json),id:row.id,areaId:row.area_id,zoneId:row.zone_id,cycleId:row.cycle_id,raisedAt:row.raised_at,ackAt:row.ack_at,ackBy:row.ack_by,restoredAt:row.restored_at,resetAt:row.reset_at};}
   readiness(area,mode='away',readingTimeoutMin=this.readingTimeoutMin(),{includeBypassCandidates=false}={}){
-    const zones=this.zones().filter(z=>this.zoneInArea(z,area.id)&&z.enabled).map(z=>this.zoneView(z,area,mode,readingTimeoutMin)),blocking=zones.filter(z=>!z.ready),incidents=this.activeIncidents(area.id);
-    const included=zones.filter(zone=>!zone.bypassed&&!zone.homeExcluded),includedCount=included.length;
-    return {ready:area.enabled&&includedCount>0&&blocking.length===0&&incidents.length===0,blockingZones:blocking.map(z=>({id:z.id,name:z.name,status:z.status,trouble:z.trouble,...(z.awaitingReading?{awaitingReading:true}:{})})),zoneCount:zones.length,includedCount,readyCount:zones.filter(z=>z.status==='normal').length,bypassedCount:zones.filter(z=>z.status==='bypassed').length,troubleCount:zones.filter(z=>['unknown','trouble'].includes(z.status)).length,activeAlarmCount:incidents.length,
+    const zones=this.zones().filter(z=>this.zoneInArea(z,area.id)&&z.enabled).map(z=>this.zoneView(z,area,mode,readingTimeoutMin)),incidents=this.activeIncidents(area.id);
+    const ordinary=zones.filter(zone=>!alwaysActive(zone)),blocking=ordinary.filter(zone=>!zone.ready);
+    const included=ordinary.filter(zone=>!zone.bypassed&&!zone.homeExcluded),includedCount=included.length;
+    const alwaysAlarms=incidents.filter(incident=>incident.zoneType==='24hour'),unacknowledged=alwaysAlarms.filter(incident=>incident.ackAt===null);
+    const keypadSiren=(['home','away'].includes(area.mode)&&incidents.length>alwaysAlarms.length)||unacknowledged.some(incident=>!incident.silent);
+    return {ready:area.enabled&&includedCount>0&&blocking.length===0&&incidents.length===0,blockingZones:blocking.map(z=>({id:z.id,name:z.name,status:z.status,trouble:z.trouble,...(z.awaitingReading?{awaitingReading:true}:{})})),zoneCount:zones.length,alwaysActiveZoneCount:zones.length-ordinary.length,includedCount,readyCount:ordinary.filter(z=>z.status==='normal').length,bypassedCount:ordinary.filter(z=>z.status==='bypassed').length,troubleCount:zones.filter(z=>['unknown','trouble'].includes(z.status)).length,activeAlarmCount:incidents.length,
+      active24HourAlarmCount:alwaysAlarms.length,unacknowledged24HourAlarmCount:unacknowledged.length,keypadSiren,
       ...(includeBypassCandidates?{bypassCandidates:included.map(({id,name,status,trouble})=>({id,name,status,trouble}))}:{})};
   }
   areaView(area,readingTimeoutMin=this.readingTimeoutMin(),{includeBypassCandidates=false}={}){
@@ -355,7 +369,7 @@ export class SecurityEngine {
   _readingHistory(deviceId){
     const raw=this.s.one('SELECT json FROM security_readings WHERE device_id=?',deviceId)?.json;
     if(typeof raw!=='string'||raw.length>100000)return {values:[]};
-    try{const history=JSON.parse(raw);if(!history||!Array.isArray(history.values))return {values:[]};const values=[];for(const pair of history.values.slice(0,MAX_PROPERTIES)){if(!Array.isArray(pair)||pair.length!==2||!pair[1]||!Number.isFinite(pair[1].at)||!scalar(pair[1].value))continue;try{property(pair[0]);values.push(pair);}catch{}}return {values,sampleAt:Number.isFinite(history.sampleAt)?history.sampleAt:null};}catch{return {values:[]};}
+    try{const history=JSON.parse(raw);if(!history||!Array.isArray(history.values))return {values:[]};const values=[];for(const pair of history.values.slice(0,MAX_PROPERTIES)){if(!Array.isArray(pair)||pair.length!==2||!pair[1]||!Number.isFinite(pair[1].at)||!scalar(pair[1].value))continue;try{property(pair[0]);values.push(pair);}catch{}}return {values,epoch:Number.isFinite(history.epoch)?history.epoch:null,sampleAt:Number.isFinite(history.sampleAt)?history.sampleAt:null};}catch{return {values:[]};}
   }
   ingest(deviceId,payload,{retain=false,at=this.now(),dup=false}={}){
     if(retain||dup||!payload||typeof payload!=='object'||Array.isArray(payload)||!Number.isFinite(at)||at>this.now()+1000||at<this.now()-MINUTE)return;
@@ -381,10 +395,27 @@ export class SecurityEngine {
         for(const zone of deviceZones){
           const reading=record.values.get(zone.property);if(!reading||!reported.has(zone.property))continue;
           readingTimeoutMin??=this.readingTimeoutMin();
-          const view=this.zoneView(zone,undefined,undefined,readingTimeoutMin),previous=this.edges.get(zone.id),persisted=previousValues.get(zone.property),previousActive=previous?.epoch===epoch?previous.active:persisted?compare(persisted.value,zone.operator,zone.value):null;
+          const view=this.zoneView(zone,undefined,undefined,readingTimeoutMin),previous=this.edges.get(zone.id),persisted=previousValues.get(zone.property);
+          const momentary=momentaryAction(zone);
           nextEdges.set(zone.id,{epoch,active:view.active,at});
-          if(view.active===false)this.s.run('UPDATE security_incidents SET restored_at=coalesce(restored_at,?) WHERE zone_id=? AND reset_at IS NULL',at,zone.id);
+          if(!momentary&&view.active===false)this.s.run('UPDATE security_incidents SET restored_at=coalesce(restored_at,?) WHERE zone_id=? AND reset_at IS NULL',at,zone.id);
           if(!view.known)continue;
+          if(alwaysActive(zone)){
+            const baseline=previous?.epoch===epoch?previous:
+              history.epoch===epoch&&persisted&&typeof persisted.value===typeof zone.value?
+                {active:compare(persisted.value,zone.operator,zone.value),at:persisted.at}:null;
+            const activated=momentary?reading.value===zone.value:
+              view.active===true&&baseline?.active===false&&baseline.at>=epoch&&at>=baseline.at&&at-baseline.at<=readingTimeoutMin*MINUTE;
+            if(!activated)continue;
+            if(momentary&&sampleAt!==null&&this.s.one("SELECT 1 FROM security_incidents WHERE zone_id=? AND json_extract(json,'$.sourceSampleAt')=? LIMIT 1",zone.id,sampleAt))continue;
+            const activation={id:uid(),momentary,sourceSampleAt:sampleAt};
+            for(const areaId of zone.areaIds){
+              const area=this.area(areaId);
+              if(area)this._trigger(area,zone,at,true,readingTimeoutMin,activation);
+            }
+            continue;
+          }
+          const previousActive=previous?.epoch===epoch?previous.active:persisted?compare(persisted.value,zone.operator,zone.value):null;
           for(const areaId of zone.areaIds){
             const area=this.area(areaId);
             if(!area||!area.enabled||area.mode==='disarmed'||area.targetMode)continue;
@@ -416,14 +447,24 @@ export class SecurityEngine {
       if(!area.entryAt){this._saveArea({...area,entryAt:at+area.entryDelaySec*1000,pendingZoneId:zone.id,pendingActivatedAt:at});this.event('entry_started',zone.name+' started the entry delay',{areaId:area.id,zoneId:zone.id});}
     }else this._trigger(area,zone,at,true,readingTimeoutMin);
   }
-  _trigger(area,zone,at=this.now(),outputs=true,readingTimeoutMin){
-    if(!this.zoneInArea(zone,area.id)||!area.enabled||area.mode==='disarmed'||!zone.enabled||this.isBypassed(zone)||this.isCycleBypassed(zone,area)||area.mode==='home'&&zone.homeBypass)return;
-    if(this.s.one('SELECT id FROM security_incidents WHERE area_id=? AND zone_id=? AND cycle_id=?',area.id,zone.id,area.cycleId))return;
-    const d=this.s.device(zone.deviceId),id=uid(),description=zone.name+' activated in armed '+area.name,view=this.zoneView(zone,area,undefined,readingTimeoutMin),details={areaName:area.name,zoneName:zone.name,deviceName:d?.name||zone.name,deviceId:zone.deviceId,networkId:d?.networkId||null,mode:area.mode,description,activatedAt:at};
+  _trigger(area,zone,at=this.now(),outputs=true,readingTimeoutMin,activation=null){
+    if(!this.zoneInArea(zone,area.id)||!area.enabled||!zone.enabled)return;
+    const always=alwaysActive(zone);
+    if(always?!activation:area.mode==='disarmed'||this.isBypassed(zone)||this.isCycleBypassed(zone,area)||area.mode==='home'&&zone.homeBypass)return;
+    const cycleId=always?activation.id:area.cycleId;
+    if(this.s.one('SELECT id FROM security_incidents WHERE area_id=? AND zone_id=? AND cycle_id=?',area.id,zone.id,cycleId))return;
+    const d=this.s.device(zone.deviceId),id=uid(),description=zone.name+(always?' activated in '+area.name+' (24-hour zone)':' activated in armed '+area.name),view=this.zoneView(zone,area,undefined,readingTimeoutMin),details={areaName:area.name,zoneName:zone.name,deviceName:d?.name||zone.name,deviceId:zone.deviceId,networkId:d?.networkId||null,mode:area.mode,description,activatedAt:at};
+    if(always)Object.assign(details,{zoneType:'24hour',silent:zone.silent===true,...(activation.momentary&&activation.sourceSampleAt!==null?{sourceSampleAt:activation.sourceSampleAt}:{})});
     this.s.transaction(()=>{
-      this.s.run('INSERT INTO security_incidents(id,area_id,zone_id,cycle_id,raised_at,restored_at,json) VALUES(?,?,?,?,?,?,?)',id,area.id,zone.id,area.cycleId,this.now(),view.active===false?this.now():null,JSON.stringify(details));
+      this.s.run('INSERT INTO security_incidents(id,area_id,zone_id,cycle_id,raised_at,restored_at,json) VALUES(?,?,?,?,?,?,?)',id,area.id,zone.id,cycleId,this.now(),view.active===false?this.now():null,JSON.stringify(details));
       const eventId=this.event('intrusion',description,{areaId:area.id,zoneId:zone.id,incidentId:id});
-      this._saveArea({...this.requireArea(area.id),entryAt:null,pendingZoneId:null});
+      const current=this.requireArea(area.id);
+      if(always&&current.targetMode){
+        this._saveArea(this.clearCycleExceptions({...current,mode:'disarmed',targetMode:null,exitAt:null,entryAt:null,pendingZoneId:null,armedAt:null}));
+        this.event('arm_blocked',current.name+' did not arm: 24-hour alarm raised',{areaId:area.id,zoneId:zone.id,incidentId:id});
+      }else if(!always||current.entryAt!=null||current.pendingZoneId!=null){
+        this._saveArea({...current,entryAt:null,pendingZoneId:null});
+      }
       const context={eventId:String(eventId),incidentId:id,areaId:area.id,area:area.name,zoneId:zone.id,zone:zone.name,deviceId:zone.deviceId,device:d?.name||zone.name,networkId:d?.networkId||null,raisedAt:this.now(),timestamp:new Date(this.now()).toISOString(),mode:area.mode,event:'intrusion',type:'intrusion'};
       if(outputs&&!this.demo)for(const action of this.actions().filter(action=>action.areaId===area.id&&action.enabled)){
         const deliveryId=uid();this.s.run("INSERT OR IGNORE INTO security_deliveries VALUES(?,?,?,?,'queued',NULL,NULL,?,?)",deliveryId,id,action.id,this.now(),JSON.stringify(action),JSON.stringify(context));

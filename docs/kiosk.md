@@ -7,8 +7,9 @@ user administration, reports, broker settings or notification configuration.
 Unlit indicators are grey. The local Sound control enables short key pips and
 one-second arming/armed tones, with the preference remembered in that browser.
 A failed disarm plays two low pips. A successful disarm plays three rising chirps.
-The red Armed LED flashes during a live alarm. With Sound on, the open keypad
-sounds a siren until every permitted area in live alarm is cleared or disarmed.
+The red Armed LED flashes during a live alarm. With Sound on, ordinary alarms
+sound while armed. Audible 24-hour alarms can sound while disarmed and stop
+when acknowledged or reset.
 Touch the keypad once after opening it to allow audio; the tablet's volume and
 output settings still apply. Sound does not replay old events after reconnection.
 

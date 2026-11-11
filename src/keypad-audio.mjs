@@ -12,7 +12,10 @@ const notesByCue={
 const isDisarmCue=kind=>kind==='disarmed'||kind==='disarmFailed';
 export function readKeypadSound(storage){try{return (storage??globalThis.localStorage)?.getItem(keypadSoundKey)!=='off';}catch{return true;}}
 export function writeKeypadSound(enabled,storage){try{(storage??globalThis.localStorage)?.setItem(keypadSoundKey,enabled?'on':'off');}catch{/* Sound preference can remain in memory. */}}
-export const liveKeypadAlarm=area=>!!area&&['home','away'].includes(area.mode)&&(area.status==='alarm'||area.activeAlarmCount>0);
+export function liveKeypadAlarm(area){
+  if(typeof area?.keypadSiren==='boolean')return area.keypadSiren;
+  return !!area&&['home','away'].includes(area.mode)&&(area.status==='alarm'||area.activeAlarmCount>0);
+}
 const phase=area=>['home','away'].includes(area.targetMode)||area.status==='exit_delay'?'arming':['home','away'].includes(area.mode)?'armed':'idle';
 const record=(area,seenAt)=>({phase:phase(area),cycle:typeof area.cycleId==='string'?area.cycleId:null,alarmAt:liveKeypadAlarm(area)?seenAt:null});
 const areaList=value=>Array.isArray(value)?value.filter(area=>area&&typeof area.id==='string'):[];

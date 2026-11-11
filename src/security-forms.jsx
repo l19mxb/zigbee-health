@@ -11,7 +11,7 @@ const memberIds=zone=>Array.isArray(zone?.areaIds)&&zone.areaIds.length?zone.are
 const editableArea=area=>area?.mode==='disarmed'&&!['exit_delay','entry_delay'].includes(area.status);
 const initial=(kind,item,state,areaId)=>{
   if(kind==='area')return {name:'',entryDelaySec:30,exitDelaySec:45,enabled:true,...item};
-  if(kind==='zone')return {name:'',deviceId:'',property:'contact',operator:'eq',value:false,type:'instant',homeBypass:false,enabled:true,...item,areaIds:item?memberIds(item):[areaId||state.areas.find(editableArea)?.id].filter(Boolean)};
+  if(kind==='zone')return {name:'',deviceId:'',property:'contact',operator:'eq',value:false,type:'instant',homeBypass:false,silent:false,enabled:true,...item,areaIds:item?memberIds(item):[areaId||state.areas.find(editableArea)?.id].filter(Boolean)};
   if(kind==='schedule')return {name:'',areaId:areaId||state.areas[0]?.id||'',days:[1,2,3,4,5],time:'22:00',timezone:state.timezone||'UTC',mode:'away',enabled:false,...item};
   return {name:'',areaId:areaId||state.areas[0]?.id||'',kind:'mqtt',networkId:state.networks[0]?.id||'',topic:'security/alerts',payloadTemplate:payloadExample,subject:'Security alarm: {{area}}',text:'Security alarm in {{area}}.\nZone: {{zone}}\nDevice: {{device}}\nMode: {{mode}}\nTime: {{timestamp}}',subscriptionIds:[],enabled:false,...item};
 };
@@ -65,6 +65,7 @@ export function SecurityForm({kind,item,state,areaId,onClose,onSave,onAccount}){
   const [error,setError]=useState(''),[busy,setBusy]=useState(false);
   const change=(key,value)=>setDraft(current=>({...current,[key]:value}));
   const label=kind==='area'?'area':kind==='zone'?'zone':kind==='schedule'?'schedule':'alert action';
+  const is24Hour=draft.type==='24hour';
   const devices=availableDevices(state),chosenDevice=devices.find(device=>device.id===draft.deviceId);
   const properties=(chosenDevice?.properties||[]).map(value=>typeof value==='string'?value:value.property).filter(Boolean);
   const membershipLocked=kind==='zone'&&!!item&&(state.incidents||[]).some(incident=>incident.zoneId===item.id&&incident.resetAt==null);
@@ -72,6 +73,10 @@ export function SecurityForm({kind,item,state,areaId,onClose,onSave,onAccount}){
     event.preventDefault();setError('');
     const body=Object.fromEntries(fieldsFor[kind].filter(key=>draft[key]!==undefined).map(key=>[key,draft[key]]));
     if(kind==='zone'){
+      if(is24Hour){
+        body.homeBypass=false;
+        body.silent=draft.silent===true;
+      }
       if(!body.areaIds.length){setError('Select at least one area for this zone.');return;}
       const linkedIds=new Set([...memberIds(item),...body.areaIds]);
       if([...linkedIds].some(id=>!editableArea(state.areas.find(area=>area.id===id)))){setError('Disarm every linked area before changing this zone.');return;}
@@ -111,10 +116,13 @@ export function SecurityForm({kind,item,state,areaId,onClose,onSave,onAccount}){
         <div className="security-field-pair"><Field label="Condition"><select value={draft.operator} onChange={e=>{change('operator',e.target.value);if(!['eq','ne'].includes(e.target.value)&&valueType!=='number'){setValueType('number');setCustomValue('');}}}><option value="eq">Equals</option><option value="ne">Does not equal</option><option value="gt">Greater than</option><option value="gte">At least</option><option value="lt">Less than</option><option value="lte">At most</option></select></Field><Field label="Value type"><select value={valueType} onChange={e=>{setValueType(e.target.value);setCustomValue(e.target.value==='boolean'?'true':'');if(e.target.value!=='number'&&!['eq','ne'].includes(draft.operator))change('operator','eq');}}><option value="boolean">On / off</option><option value="number">Number</option><option value="string">Text</option></select></Field></div>
         <Field label="Activation value">{valueType==='boolean'?<select value={customValue} onChange={e=>setCustomValue(e.target.value)}><option value="true">True</option><option value="false">False</option></select>:<input required type={valueType==='number'?'number':'text'} step={valueType==='number'?'any':undefined} maxLength={200} value={customValue} onChange={e=>setCustomValue(e.target.value)}/>}</Field>
       </>}
-      <Field label="Zone type"><select value={draft.type} onChange={e=>change('type',e.target.value)}><option value="instant">Instant</option><option value="entry">Entry</option></select></Field>
-      <Check checked={draft.homeBypass} onChange={value=>change('homeBypass',value)}>Bypass in Home mode</Check>
+      <Field label="Zone type" hint={is24Hour?'Raises an immediate alarm when activated, even while disarmed. Uses the area’s configured alert actions.':undefined}><select value={draft.type} onChange={e=>change('type',e.target.value)}><option value="instant">Instant</option><option value="entry">Entry</option><option value="24hour">24-hour</option></select></Field>
+      {is24Hour?<><p className="small muted">For a button, choose Custom condition and set the <code>action</code> property to equal a text value the device reports, such as <code>single</code>.</p>
+        <Check checked={draft.silent===true} onChange={value=>change('silent',value)}>Silent on keypad</Check>
+        <p className="small muted">Configured alert actions still run.</p>
+      </>:<Check checked={draft.homeBypass} onChange={value=>change('homeBypass',value)}>Bypass in Home mode</Check>}
       <Check checked={draft.enabled} onChange={value=>change('enabled',value)}>Zone enabled</Check>
-      <p className="security-form-footnote">This zone uses the shared reading timeout under Security → Settings. It waits for a fresh reading before it is ready to arm.</p>
+      <p className="security-form-footnote">{is24Hour?'24-hour zones cannot be bypassed.':'This zone uses the shared reading timeout under Security → Settings. It waits for a fresh reading before it is ready to arm.'}</p>
     </>:null}
     {kind==='schedule'?<>
       <div className="security-field-pair"><Field label="Time"><input type="time" required value={draft.time} onInput={e=>change('time',e.currentTarget.value)} onChange={e=>change('time',e.target.value)}/></Field><Field label="Set area to"><select value={draft.mode} onChange={e=>change('mode',e.target.value)}>{Object.entries(modeNames).map(([value,name])=><option key={value} value={value}>{name}</option>)}</select></Field></div>
@@ -146,15 +154,16 @@ export function SecurityForm({kind,item,state,areaId,onClose,onSave,onAccount}){
 export function SecurityCommandDialog({area,action,zones,onClose,onSave}){
   const [reason,setReason]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
   const arming=action==='arm_home'||action==='arm_away',home=action==='arm_home';
-  const included=zones.filter(zone=>zone.enabled&&!zone.bypassed&&!(home&&zone.homeBypass));
+  const has24Hour=zones.some(zone=>zone.enabled&&zone.type==='24hour');
+  const included=zones.filter(zone=>zone.enabled&&zone.type!=='24hour'&&!zone.bypassed&&!(home&&zone.homeBypass));
   const blocking=included.filter(zone=>zone.trouble||!zone.known||zone.active||['unknown','trouble','active'].includes(zone.status));
   const title={arm_home:'Arm Home',arm_away:'Arm Away',disarm:'Disarm',acknowledge:'Acknowledge alarms',reset:'Reset alarm memory'}[action];
   const cannotArm=arming&&(!area.enabled||!included.length||blocking.length>0||area.activeAlarmCount>0);
   return <Modal title={title+' · '+area.name} onClose={()=>{if(!busy)onClose();}}><form className="security-form" onSubmit={async event=>{event.preventDefault();setError('');setBusy(true);try{await onSave('security/command',{areaId:area.id,action,reason});}catch(error){setError(error.message);}finally{setBusy(false);}}}>
     {arming?<>
-      <p>{home?'Only zones included in Home mode will be armed.':'All enabled, unbypassed zones will be armed.'}{area.exitDelaySec?' The exit delay is '+area.exitDelaySec+' seconds.':''}</p>
-      {cannotArm?<div className="notice warning"><strong>This area is not ready to arm.</strong>{!area.enabled?<p>The area is disabled.</p>:null}{!included.length?<p>Add an enabled zone first.</p>:null}{area.activeAlarmCount>0?<p>Acknowledge and reset existing alarm memory while disarmed.</p>:null}{blocking.length?<ul>{blocking.map(zone=><li key={zone.id}>{zone.name}: {zone.trouble||(!zone.known?'waiting for a fresh reading':zone.active?'active / open':zone.status)}</li>)}</ul>:null}</div>:<div className="notice"><strong>Ready to arm.</strong> {included.length} zones included{home&&zones.some(zone=>zone.homeBypass)?'; Home bypasses applied':''}.</div>}
-    </>:<p>{action==='disarm'?'Stop monitoring new security activations in this area. Alarm memory remains until it is acknowledged and reset.':action==='acknowledge'?'Record that you have seen this area’s security alarms. Acknowledgement does not disarm the area.':'Clear acknowledged alarm memory. The area must be disarmed, with its zones restored or explicitly bypassed.'}</p>}
+      <p>{home?'Only zones included in Home mode will be armed.':'All enabled, unbypassed arming zones will be armed.'}{area.exitDelaySec?' The exit delay is '+area.exitDelaySec+' seconds.':''}</p>
+      {cannotArm?<div className="notice warning"><strong>This area is not ready to arm.</strong>{!area.enabled?<p>The area is disabled.</p>:null}{!included.length?<p>Include an enabled Instant or Entry zone before arming.</p>:null}{area.activeAlarmCount>0?<p>Acknowledge and reset existing alarm memory while disarmed.</p>:null}{blocking.length?<ul>{blocking.map(zone=><li key={zone.id}>{zone.name}: {zone.trouble||(!zone.known?'waiting for a fresh reading':zone.active?'active / open':zone.status)}</li>)}</ul>:null}</div>:<div className="notice"><strong>Ready to arm.</strong> {included.length} zones included{home&&zones.some(zone=>zone.homeBypass)?'; Home bypasses applied':''}.</div>}
+    </>:<p>{action==='disarm'?'Disarm this area. '+(has24Hour?'24-hour zones continue to raise alarms. ':'')+'Alarm memory remains until it is acknowledged and reset.':action==='acknowledge'?'Record that you have seen this area’s security alarms. Acknowledgement does not disarm the area.':'Clear acknowledged alarm memory. The area must be disarmed, with its zones restored or explicitly bypassed.'}</p>}
     <Field label="Reason / note" maxLength={300} value={reason} onChange={e=>setReason(e.target.value)} placeholder="Optional"/>
     {error?<div className="notice critical" role="alert">{error}</div>:null}
     <div className="form-actions"><button type="button" disabled={busy} onClick={onClose}>Cancel</button><button className="primary" disabled={busy||cannotArm}>{busy?'Applying…':title}</button></div>

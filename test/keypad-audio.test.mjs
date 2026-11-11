@@ -146,6 +146,20 @@ test('keypad alarm requires an armed area rather than disarmed alarm memory or e
   assert.equal(liveKeypadAlarm(null),false);
 });
 
+test('keypad uses server siren state for audible and silent 24-hour alarms',()=>{
+  const f=fixture();
+  const alarm={...f.idle(),status:'alarm',activeAlarmCount:1,active24HourAlarmCount:1,keypadSiren:true};
+  try{
+    f.audio.observe(f.snapshot([alarm]));
+    f.audio.gesture({pip:false});
+    assert.equal(f.voices.length,1);
+    assert.equal(f.voices[0].type,'triangle');
+    f.audio.observe(f.snapshot([{...alarm,keypadSiren:false}]));
+    assert.equal(f.voices[0].disconnected,true);
+    assert.equal(liveKeypadAlarm({...f.armed(),status:'alarm',active24HourAlarmCount:1,keypadSiren:false}),false);
+  }finally{f.audio.destroy();}
+});
+
 test('unlock during an alarm starts one sweeping siren for multiple areas and disarm stops it at the last area',()=>{
   const f=fixture();
   const alarm=id=>({...f.armed(id),status:'alarm',activeAlarmCount:1});

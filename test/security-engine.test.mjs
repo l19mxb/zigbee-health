@@ -32,6 +32,119 @@ test('retained, duplicate, invalid and out-of-window reports never establish a b
 
 test('fresh normal-to-active edge raises one latched incident and one action per arm cycle',()=>{const f=fixture();f.normal();f.action();f.arm();f.advance(100);f.report('door',{contact:false});const incident=f.e.activeIncidents()[0];assert.ok(incident);assert.equal(f.e.queuedActions().length,1);for(let i=0;i<10;i++)f.report('door',{contact:false});f.report('door',{contact:true});f.report('door',{contact:false});assert.equal(f.e.activeIncidents().length,1);assert.equal(f.e.queuedActions().length,1);assert.equal(f.e.state().areas[0].status,'alarm');f.close();});
 
+test('24-hour stateful zones alarm only on a fresh edge and keep independent memory while disarmed',()=>{
+  const f=fixture();try{
+    f.e.saveZone({id:f.door.id,type:'24hour'});f.action();
+    f.report('door',{contact:false},{retain:true});f.report('door',{contact:false},{dup:true});
+    f.report('door',{contact:false});f.report('door',{contact:false});
+    assert.equal(f.e.activeIncidents().length,0);
+    f.report('door',{contact:true});f.restart();
+    assert.equal(f.e.activeIncidents().length,0);
+    f.advance(10);f.report('door',{contact:false});f.report('door',{contact:false});
+    const [alarm]=f.e.activeIncidents();
+    assert.equal(f.e.activeIncidents().length,1);
+    assert.deepEqual([alarm.zoneType,alarm.silent,alarm.mode,alarm.restoredAt],['24hour',false,'disarmed',null]);
+    assert.equal(f.e.queuedActions().length,1);
+    const area=()=>f.e.areaView(f.e.requireArea(f.area.id));
+    assert.deepEqual([area().status,area().active24HourAlarmCount,area().unacknowledged24HourAlarmCount,area().keypadSiren],['alarm',1,1,true]);
+    f.e.command(f.area.id,'disarm',{},'operator');
+    assert.equal(area().keypadSiren,true);
+    f.e.command(f.area.id,'acknowledge',{},'operator');
+    assert.deepEqual([area().active24HourAlarmCount,area().unacknowledged24HourAlarmCount,area().keypadSiren],[1,0,false]);
+    assert.throws(()=>f.e.command(f.area.id,'reset',{},'operator'),/Restore/);
+    f.restart();f.report('door',{contact:false});
+    assert.equal(f.e.activeIncidents().length,1);
+    f.advance(10);f.report('door',{contact:true});
+    assert.ok(f.e.activeIncidents()[0].restoredAt);
+    f.advance(10);f.report('door',{contact:false});
+    const incidents=f.e.activeIncidents();
+    assert.equal(incidents.length,2);assert.notEqual(incidents[0].cycleId,incidents[1].cycleId);
+    assert.deepEqual([area().active24HourAlarmCount,area().unacknowledged24HourAlarmCount,area().keypadSiren],[2,1,true]);
+  }finally{f.close();}
+});
+
+test('24-hour action buttons accept repeated presses, suppress duplicate samples, and route silent alarms to each enabled area',()=>{
+  const f=fixture();try{
+    const annex=f.e.saveArea({name:'Annex'}),zone=f.e.saveZone({id:f.motion.id,areaIds:[f.area.id,annex.id],type:'24hour',property:'action',value:'single',silent:true});
+    assert.deepEqual([zone.known,zone.active,zone.ready,zone.status,zone.homeBypass],[true,false,true,'normal',false]);
+    f.s.set('email',{enabled:true});f.action();f.e.saveAction({name:'Annex email',areaId:annex.id,kind:'email',enabled:true});
+    const timestamped=()=>f.report('motion',{action:'single',last_seen:f.now()});
+    f.report('motion',{action:'single'},{retain:true});f.report('motion',{action:'single'},{dup:true});
+    f.report('motion',{action:'other'});f.report('motion',{action:null});
+    assert.equal(f.e.activeIncidents().length,0);
+    timestamped();timestamped();
+    const first=f.e.activeIncidents();
+    assert.equal(first.length,2);assert.equal(first[0].cycleId,first[1].cycleId);
+    assert.ok(first.every(incident=>incident.silent&&incident.zoneType==='24hour'&&incident.restoredAt));
+    assert.deepEqual(new Set(f.e.queuedActions().map(job=>job.action.kind)),new Set(['mqtt','email']));
+    assert.ok(f.e.state().areas.every(area=>area.status==='alarm'&&area.unacknowledged24HourAlarmCount===1&&!area.keypadSiren));
+    f.restart();timestamped();
+    assert.equal(f.e.activeIncidents().length,2);
+    f.advance(10);timestamped();
+    f.report('motion',{action:'single'});f.report('motion',{action:'single'});
+    assert.equal(f.e.activeIncidents().length,8);
+    f.e.saveArea({id:annex.id,enabled:false});
+    f.report('motion',{action:'single'});
+    assert.equal(f.e.activeIncidents(annex.id).length,4);assert.equal(f.e.activeIncidents(f.area.id).length,5);
+    f.s.saveDevice({...f.s.device('motion'),availability:'offline'});
+    const unavailable=f.e.zoneState(f.e.zone(zone.id));
+    assert.deepEqual([unavailable.known,unavailable.ready,unavailable.status],[false,false,'trouble']);
+    f.report('motion',{action:'single'});
+    assert.equal(f.e.activeIncidents().length,9);
+    f.s.saveDevice({...f.s.device('motion'),availability:'online'});f.normal();
+    f.e.command(f.area.id,'acknowledge',{},'operator');
+    f.e.command(f.area.id,'reset',{},'operator');
+    assert.equal(f.e.activeIncidents(f.area.id).length,0);
+    f.report('motion',{action:'single'});
+    assert.equal(f.e.activeIncidents(f.area.id).length,1);
+    assert.equal(f.e.activeIncidents(annex.id).length,4);
+  }finally{f.close();}
+});
+
+test('24-hour rules cannot be bypassed and do not determine ordinary arming readiness',()=>{
+  const f=fixture();try{
+    assert.throws(()=>f.e.saveZone({id:f.motion.id,type:'24hour',homeBypass:true}),/cannot be bypassed in Home/);
+    assert.throws(()=>f.e.saveZone({id:f.motion.id,type:'24hour',property:'action',operator:'ne',value:'single'}),/nonempty text value/);
+    f.e.bypassZone(f.motion.id,{durationMin:null,reason:'Legacy test bypass'});
+    const zone=f.e.saveZone({id:f.motion.id,type:'24hour',silent:true});
+    assert.deepEqual([zone.homeBypass,zone.bypassAt,zone.bypassUntil,zone.silent],[false,null,null,true]);
+    assert.throws(()=>f.e.bypassZone(zone.id,{durationMin:null,reason:'Test bypass'}),/24-hour zones cannot be bypassed/);
+    f.report('door',{contact:true});
+    const readiness=f.e.readiness(f.e.requireArea(f.area.id),'away',undefined,{includeBypassCandidates:true});
+    assert.deepEqual([readiness.ready,readiness.zoneCount,readiness.alwaysActiveZoneCount,readiness.includedCount],[true,2,1,1]);
+    assert.deepEqual(readiness.bypassCandidates.map(item=>item.id),[f.door.id]);
+    f.arm('home');
+    const armed=f.e.requireArea(f.area.id);
+    assert.throws(()=>f.e.bypassZoneForCycle({areaId:armed.id,cycleId:armed.cycleId,zoneId:zone.id}),/no longer included/);
+    f.e.command(armed.id,'disarm',{},'operator');
+    f.e.saveZone({id:f.door.id,enabled:false});
+    assert.throws(()=>f.arm(),/included zone must remain protected/);
+    f.report('motion',{occupancy:false});f.report('motion',{occupancy:true});
+    assert.equal(f.e.activeIncidents().length,1);
+    f.e.saveZone({id:zone.id,type:'instant'});
+    assert.equal(Object.hasOwn(f.e.zone(zone.id),'silent'),false);
+    assert.equal(f.e.activeIncidents()[0].silent,true);
+  }finally{f.close();}
+});
+
+test('a 24-hour activation interrupts both exit and entry delays immediately',()=>{
+  const f=fixture({exitDelaySec:5,entryDelaySec:20});try{
+    const zone=f.e.saveZone({id:f.motion.id,type:'24hour',property:'action',value:'single'});
+    f.normal();f.arm();assert.equal(f.e.requireArea(f.area.id).targetMode,'away');
+    f.report('motion',{action:'single'});
+    let area=f.e.requireArea(f.area.id);
+    assert.deepEqual([area.mode,area.targetMode,area.exitAt],['disarmed',null,null]);
+    assert.equal(f.e.activeIncidents()[0].zoneId,zone.id);
+    assert.equal(f.e.state().events.filter(event=>event.type==='arm_blocked').length,1);
+    f.e.command(area.id,'acknowledge',{},'operator');f.e.command(area.id,'reset',{},'operator');
+    f.arm();f.advance(5000);f.e.tick();
+    f.report('door',{contact:false});assert.ok(f.e.requireArea(area.id).entryAt);
+    f.report('motion',{action:'single'});area=f.e.requireArea(area.id);
+    assert.deepEqual([area.mode,area.entryAt,area.pendingZoneId],['away',null,null]);
+    assert.deepEqual(f.e.activeIncidents().map(incident=>incident.zoneId),[zone.id]);
+  }finally{f.close();}
+});
+
 test('restore, acknowledge, disarm and reset remain separate and accountable',()=>{const f=fixture();f.normal();f.arm();f.report('door',{contact:false});f.e.command(f.area.id,'acknowledge',{},'operator');assert.ok(f.e.activeIncidents()[0].ackAt);assert.equal(f.e.activeIncidents()[0].ackBy,'operator');assert.equal(f.e.state().areas[0].mode,'away');assert.throws(()=>f.e.command(f.area.id,'reset',{},'operator'),/Disarm/);f.e.command(f.area.id,'disarm',{},'operator');assert.equal(f.e.activeIncidents().length,1);assert.throws(()=>f.e.command(f.area.id,'reset',{},'operator'),/Restore/);f.report('door',{contact:true});f.e.command(f.area.id,'reset',{},'operator');assert.equal(f.e.activeIncidents().length,0);assert.equal(f.e.state().areas[0].status,'disarmed');assert.ok(f.e.state().events.some(event=>event.actor==='operator'&&event.type==='alarm_reset'));f.close();});
 
 test('acknowledging the entire Security stack is atomic and preserves reset history, modes and deliveries',()=>{

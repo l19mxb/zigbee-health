@@ -8,6 +8,7 @@ import './security.css';
 const tabs=[['overview','Overview'],['zones','Zones'],['settings','Settings'],['schedules','Schedules'],['actions','Alert actions']];
 const modeName={disarmed:'Disarmed',home:'Armed Home',away:'Armed Away'};
 const deliveryName={mqtt:'MQTT event',email:'Email',push:'Browser push'};
+const zoneTypeName={instant:'Instant',entry:'Entry','24hour':'24-hour'};
 const days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const canConfigure=area=>area?.mode==='disarmed'&&!['exit_delay','entry_delay'].includes(area.status);
 const manualBypass=zone=>zone.manualBypassed===true;
@@ -21,7 +22,7 @@ const zonesForArea=(zones,areaId)=>zones.filter(zone=>membershipIds(zone).includ
 const zoneEditable=(zone,areas)=>membershipIds(zone).length>0&&membershipIds(zone).every(id=>canConfigure(areas.get(id)));
 const areaRemovable=(area,zones,areas,incidents)=>canConfigure(area)&&!area.activeAlarmCount&&zones.filter(zone=>membershipIds(zone).includes(area.id)).every(zone=>zoneEditable(zone,areas)&&!incidents.some(incident=>incident.zoneId===zone.id&&incident.resetAt==null));
 function bypassChoices(zone,areas,canOpenKeypad){
-  if(!zone?.enabled||manualBypass(zone))return [];
+  if(!zone?.enabled||zone.type==='24hour'||manualBypass(zone))return [];
   return membershipIds(zone).flatMap(id=>{
     const area=areas.get(id),membership=zone.areaStates?.find(view=>view.areaId===id);
     if(!area?.enabled||area.targetMode||area.activeAlarmCount!==0||!(area.includedCount>1)
@@ -41,7 +42,10 @@ function timeoutDuration(minutes){
   return [[Math.floor(minutes/1440),'day'],[Math.floor(minutes%1440/60),'hour'],[minutes%60,'minute']]
     .filter(([count])=>count>0).map(([count,unit])=>plural(count,unit)).join(' ');
 }
-function areaStatus(area){return area.status==='alarm'?'Alarm':area.status==='exit_delay'?'Exit delay':area.status==='entry_delay'?'Entry delay':modeName[area.mode]||'Disarmed';}
+function areaStatus(area){
+  if(area.status==='alarm')return area.mode==='disarmed'&&area.active24HourAlarmCount>0?'24-hour alarm':'Alarm';
+  return area.status==='exit_delay'?'Exit delay':area.status==='entry_delay'?'Entry delay':modeName[area.mode]||'Disarmed';
+}
 function zoneLabel(zone){if(manualBypass(zone))return 'Manual bypass';if(zone.cycleBypassed)return 'Cycle bypass';if(zone.homeExcluded)return 'Home bypass';if(zone.bypassed||zone.status==='bypassed')return 'Bypassed';if(!zone.enabled)return 'Disabled';if(zone.trouble||zone.status==='trouble')return 'Trouble';if(!zone.known||zone.status==='unknown')return 'Waiting for reading';if(zone.active)return zone.property==='contact'?'Open':'Active';return zone.property==='contact'?'Closed':['occupancy','vibration'].includes(zone.property)?'Clear':'Normal';}
 function zoneTone(zone){return zone.bypassed||zone.status==='bypassed'||!zone.enabled?'neutral':zone.trouble||!zone.known?'warning':zone.active?'critical':'healthy';}
 function Shield({alert=false}){return <svg className="security-shield" viewBox="0 0 80 92" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M40 5 69 18v24c0 22-18 36-29 43C29 78 11 64 11 42V18L40 5Z"/>{alert?<path d="M40 28v23m0 10v2"/>:null}</svg>;}
@@ -202,16 +206,25 @@ function SecuritySettings({timeout,canChange,manage,busy,disconnected,onSave}){
 
 function AreaPanel({area,zones,incidents,now,control,manage,removeAllowed,onCommand,onEdit,onRemove,onZones}){
   const memory=area.activeAlarmCount>0,alarm=area.status==='alarm',waiting=['entry_delay','exit_delay'].includes(area.status);
+  const enabledZones=zones.filter(zone=>zone.enabled);
+  const alwaysActiveCount=area.alwaysActiveZoneCount??enabledZones.filter(zone=>zone.type==='24hour').length;
+  const armingCount=(area.zoneCount??enabledZones.length)-alwaysActiveCount;
+  const armingReady=area.readyCount??enabledZones.filter(zone=>zone.type!=='24hour'&&zone.known&&!zone.active&&!zone.trouble&&!zone.bypassed).length;
+  const disarmed24HourAlarm=area.mode==='disarmed'&&area.active24HourAlarmCount>0;
   const countdown=Math.max(0,Math.ceil((((area.status==='entry_delay'?area.entryAt:area.exitAt)||now)-now)/1000));
   const attentionCount=(area.blockingZones||[]).length||area.troubleCount||1;
-  const subtitle=alarm?(modeName[area.mode]+' · Alarm memory latched'):memory?'Alarm memory requires attention':area.status==='entry_delay'?'Disarm before the entry delay expires':area.status==='exit_delay'?'Leave the area before the exit delay expires':area.ready?'Ready to arm':!area.enabled?'Area disabled':!zones.filter(zone=>zone.enabled).length?'Add zones to this area':plural(attentionCount,'zone')+(attentionCount===1?' needs':' need')+' attention';
+  let alarmDetail='Alarm memory latched';
+  if(disarmed24HourAlarm&&area.unacknowledged24HourAlarmCount>0){
+    alarmDetail=incidents.some(incident=>incident.zoneType==='24hour'&&incident.restoredAt==null)?'24-hour zone active':'Awaiting acknowledgement';
+  }
+  const subtitle=alarm?(modeName[area.mode]+' · '+alarmDetail):memory?'Alarm memory requires attention':area.status==='entry_delay'?'Disarm before the entry delay expires':area.status==='exit_delay'?'Leave the area before the exit delay expires':area.ready?'Ready to arm':!area.enabled?'Area disabled':!enabledZones.length?'Add zones to this area':!armingCount?'No zones configured for arming':plural(attentionCount,'zone')+(attentionCount===1?' needs':' need')+' attention';
   const tone=alarm||memory?'alarm':area.ready?'ready':'attention';
   return <section className={'security-area-panel security-tone-'+tone} aria-label={area.name+' security panel'}>
     <div className="security-area-panel-heading"><h2>{area.name}</h2>{manage?<div className="security-area-tools"><button className="icon-button" aria-label={'Edit area '+area.name} title={canConfigure(area)?'Edit area':'Disarm this area before editing'} disabled={!canConfigure(area)} onClick={onEdit}><Icon name="settings" size={17}/></button><button className="icon-button" aria-label={'Remove area '+area.name} title={removeAllowed?'Remove area':'Disarm all linked areas and reset shared-zone alarm memory before removing this area'} disabled={!removeAllowed} onClick={onRemove}><Icon name="close" size={16}/></button></div>:null}</div>
     <div className="security-area-main"><div className="security-area-controls">
       <div className="security-status-display" aria-live="polite"><Shield alert={alarm||memory}/><div><strong>{areaStatus(area)}</strong><p>{subtitle}</p>{waiting?<b className="security-countdown" role="timer" aria-live="off">{Math.floor(countdown/60)}:{String(Math.floor(countdown%60)).padStart(2,'0')}</b>:null}</div></div>
       <div className="security-mode-buttons"><button className={area.mode==='disarmed'&&!waiting?'current-mode':''} disabled={!control||area.mode==='disarmed'&&!waiting} onClick={()=>onCommand('disarm',area)}>Disarm</button><button className="primary" disabled={!control||!canConfigure(area)||!area.enabled} onClick={()=>onCommand('arm_home',area)}>Arm Home</button><button className="primary" disabled={!control||!canConfigure(area)||!area.enabled} onClick={()=>onCommand('arm_away',area)}>Arm Away</button></div>
-      <p className="security-zone-count"><strong>{plural(area.zoneCount??zones.length,'zone')}</strong><span>·</span>{area.ready?'All ready':(area.readyCount??zones.filter(zone=>zone.known&&!zone.active&&!zone.trouble&&!zone.bypassed).length)+' ready'}</p>
+      <p className="security-zone-count"><strong>{plural(armingCount,alwaysActiveCount?'arming zone':'zone')}</strong>{armingCount||!alwaysActiveCount?<><span>·</span>{area.ready?'All ready':armingReady+' ready'}</>:null}{alwaysActiveCount>0?<><span>·</span>{plural(alwaysActiveCount,'24-hour zone')}</>:null}</p>
       <p className="security-delays">Entry delay {area.entryDelaySec}s · Exit delay {area.exitDelaySec}s{area.bypassedCount?' · '+plural(area.bypassedCount,'bypass'):''}</p>
       {area.cycleBypassCount>0?<div className="notice warning" style={{overflowWrap:'anywhere'}}><strong>{area.cycleBypassCount} cycle {area.cycleBypassCount===1?'bypass':'bypasses'} until disarm</strong><p>{(area.cycleBypasses||[]).map(zone=>zone.name).join(', ')}</p></div>:null}
       {memory&&control?<div className="security-memory-actions"><button onClick={()=>onCommand('acknowledge',area)}>Acknowledge alarms</button><button disabled={area.mode!=='disarmed'||!incidents.every(incident=>incident.ackAt)||!zones.every(zone=>zone.ready)} onClick={()=>onCommand('reset',area)}>Reset memory</button></div>:null}
@@ -229,7 +242,7 @@ function SecurityAlarmStack({state,areas,control,onCommand,onAcknowledgeAll,ackn
       {onAcknowledgeAll?<button type="button" disabled={!control||!unacknowledged} onClick={onAcknowledgeAll}>Acknowledge all</button>:null}
     </PanelHeading>
     {acknowledgeError?<p className="notice critical" role="alert">{acknowledgeError}</p>:null}
-    {incidents.length?<><div className="table-scroll security-table"><table><thead><tr><SortHead column="raisedAt" table={table}>Raised</SortHead><SortHead column="areaName" table={table}>Area / zone</SortHead><SortHead column="alarmState" table={table}>State</SortHead><th>Actions</th></tr></thead><tbody>{table.rows.map(incident=><tr key={incident.id}><td>{date(incident.raisedAt,true)}</td><td><strong>{incident.areaName}</strong><span className="row-subtitle">{incident.name}</span></td><td><Badge tone={incident.ackAt?'acknowledged':'critical'}>{incident.alarmState}</Badge>{incident.restoredAt?<span className="security-restored">Zone restored</span>:null}</td><td><div className="record-actions">{areas.get(incident.areaId)&&control?<><button disabled={!!incident.ackAt} onClick={()=>onCommand('acknowledge',areas.get(incident.areaId))}>Acknowledge</button><button disabled={!canResetArea(incident.areaId)} onClick={()=>onCommand('reset',areas.get(incident.areaId))}>Reset memory</button></>:<span className="muted">—</span>}</div></td></tr>)}</tbody></table></div>{incidents.length>10?<Pagination total={table.filtered.length} {...table}/>:null}</>:<div className="security-clear-state"><Icon name="check" size={24}/><p>No active <strong>security alarms</strong></p></div>}
+    {incidents.length?<><div className="table-scroll security-table"><table><thead><tr><SortHead column="raisedAt" table={table}>Raised</SortHead><SortHead column="areaName" table={table}>Area / zone</SortHead><SortHead column="alarmState" table={table}>State</SortHead><th>Actions</th></tr></thead><tbody>{table.rows.map(incident=><tr key={incident.id}><td>{date(incident.raisedAt,true)}</td><td><strong>{incident.areaName}</strong><span className="row-subtitle">{incident.name}</span></td><td><Badge tone={incident.ackAt?'acknowledged':'critical'}>{incident.alarmState}</Badge>{incident.zoneType==='24hour'?<span className="row-subtitle">24-hour alarm</span>:null}{incident.restoredAt?<span className="security-restored">Zone restored</span>:null}</td><td><div className="record-actions">{areas.get(incident.areaId)&&control?<><button disabled={!!incident.ackAt} onClick={()=>onCommand('acknowledge',areas.get(incident.areaId))}>Acknowledge</button><button disabled={!canResetArea(incident.areaId)} onClick={()=>onCommand('reset',areas.get(incident.areaId))}>Reset memory</button></>:<span className="muted">—</span>}</div></td></tr>)}</tbody></table></div>{incidents.length>10?<Pagination total={table.filtered.length} {...table}/>:null}</>:<div className="security-clear-state"><Icon name="check" size={24}/><p>No active <strong>security alarms</strong></p></div>}
   </section>;
 }
 
@@ -254,21 +267,22 @@ function Zones({state,manage,control,canOpenKeypad,onAdd,onEdit,onRemove,onBypas
       <div className="table-scroll security-table"><table><thead><tr><SortHead column="name" table={table}>Zone</SortHead><SortHead column="areaName" table={table}>Areas</SortHead><SortHead column="deviceName" table={table}>Device</SortHead><SortHead column="type" table={table}>Type</SortHead><SortHead column="status" table={table}>Status by area</SortHead><th>Actions</th></tr></thead><tbody>{table.rows.map(zone=>{
         const editable=zoneEditable(zone,areas),shared=membershipIds(zone).length>1,alarmMemory=state.incidents.some(incident=>incident.zoneId===zone.id&&incident.resetAt==null),manual=manualBypass(zone),cycleNames=membershipIds(zone).filter(id=>zoneForArea(zone,id).cycleBypassed).map(id=>areas.get(id)?.name||'Removed area');
         const choices=control?bypassChoices(zone,areas,canOpenKeypad):[];
+        const showBypass=control&&(zone.type!=='24hour'||manual);
         const bypassLabel=manual?'Clear manual bypass':choices.length===1
           ?choices[0].mode==='disarmed'?'Bypass for Arm Away':'Bypass until disarm…'
           :'Bypass zone…';
         return <tr key={zone.id}>
-          <td><strong>{zone.name}</strong>{zone.homeBypass?<span className="row-subtitle">Bypassed in Home mode</span>:null}</td>
+          <td><strong>{zone.name}</strong>{zone.type!=='24hour'&&zone.homeBypass?<span className="row-subtitle">Bypassed in Home mode</span>:null}</td>
           <td className="security-zone-memberships">{zone.areaName}{shared?<span className="row-subtitle">Shared zone · {membershipIds(zone).length} areas</span>:null}</td>
           <td>{zone.deviceName||'Device unavailable'}<span className="row-subtitle">{zone.networkLabel}</span></td>
-          <td>{zone.type==='entry'?'Entry':'Instant'}</td>
+          <td>{zoneTypeName[zone.type]||'Instant'}{zone.type==='24hour'&&zone.silent?<span className="row-subtitle">Silent on keypad</span>:null}</td>
           <td><MembershipStatus zone={zone}/>{zone.trouble?<span className="row-subtitle">{zone.trouble}</span>:null}{manual?<span className="row-subtitle">{zone.bypassUntil?'Manual bypass until '+date(zone.bypassUntil,true):'Until manually cleared'}</span>:null}{cycleNames.length?<span className="row-subtitle">Cycle bypass until disarm: {cycleNames.join(', ')}</span>:null}</td>
           <td><div className="record-actions">{manage?<>
             <button aria-label={'Edit zone '+zone.name} title={editable?'Edit shared zone settings':'Disarm every linked area before editing this zone'} disabled={!editable} onClick={()=>onEdit(zone)}>Edit</button>
             <button aria-label={'Remove zone '+zone.name} title={alarmMemory?'Reset this zone’s alarm memory before removing it':editable?'Remove this zone from every linked area':'Disarm every linked area before removing this zone'} disabled={!editable||alarmMemory} onClick={()=>onRemove(zone)}>Remove</button>
-          </>:null}{control?<button type="button" aria-label={bypassLabel+' · '+zone.name} disabled={!manual&&!choices.length}
+          </>:null}{showBypass?<button type="button" aria-label={bypassLabel+' · '+zone.name} disabled={!manual&&!choices.length}
             title={manual&&shared?'Clear the existing bypass in every linked area':!manual&&!choices.length?'No linked area can bypass this zone right now':undefined}
-            onClick={()=>onBypass(zone,choices)}>{bypassLabel}</button>:null}{!manage&&!control?<span className="muted">Read only</span>:null}</div></td>
+            onClick={()=>onBypass(zone,choices)}>{bypassLabel}</button>:null}{!manage&&!showBypass?<span className="muted">Read only</span>:null}</div></td>
         </tr>;
       })}</tbody></table></div><Pagination total={table.filtered.length} {...table}/>
     </>:<p className="security-table-empty">{table.search?'No zones match this search.':'No zones yet. Select a Zigbee device, its activation and one or more areas it protects.'}</p>}

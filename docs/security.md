@@ -15,9 +15,10 @@ The isolated simulation includes synthetic examples and cannot send real alerts.
    means activation. For a typical
    Zigbee2MQTT contact sensor, `contact: false` means open; for a motion sensor,
    `occupancy: true` means motion. Check your device's actual reported values.
-3. Choose **Entry** for an entry route that should start the area's entry delay,
-   or **Instant** for immediate activation. Choose whether the zone is bypassed
-   in Home mode, for example an indoor motion sensor.
+3. Choose **Entry** for an entry route that starts the area's entry delay,
+   **Instant** for an immediate alarm while armed, or **24-hour** for an
+   immediate alarm in any arming state. Entry and Instant zones can be
+   excluded in Home mode, for example an indoor motion sensor.
 4. Wait for fresh reports from the selected properties. The panel shows unknown,
    open/active and unavailable zones instead of claiming they are ready.
 5. Add optional schedules and alert actions, then enable each one deliberately.
@@ -27,18 +28,35 @@ device preserves its zone link. A retired, disabled, missing or unavailable
 device becomes a zone trouble condition; a replacement device must be selected
 explicitly. Broker/device availability does not itself count as intrusion.
 
+## 24-hour zones
+
+An enabled **24-hour** zone raises an alarm in each enabled area assigned to it,
+including when that area is disarmed or in an entry or exit delay. It uses the
+area's enabled alert actions and appears in the Security alarm stack. Home mode
+and cycle bypasses leave 24-hour zones in service.
+
+For a Zigbee2MQTT button, choose **Custom condition**. Set **Activation property**
+to `action`, **Condition** to **Equals**, and **Value type** to **Text**. Enter
+the value the button sends for the press you want to monitor, such as `single`.
+See the [Zigbee2MQTT emergency-button example](https://www.zigbee2mqtt.io/devices/HS1EB_HS1EB-E.html).
+Each matching live press creates an alarm and the button can be reset without a
+release report. A stateful zone such as a contact uses a fresh change from normal
+to active. Choose **Silent on keypad** for a zone that should still log alarms
+and run its alerts without sounding the keypad siren.
+
 ## Shared zones
 
 A zone can belong to several areas. Edit its **Areas** checkboxes to choose the
-memberships. Each selected area includes that same physical detector in its
+memberships. Each selected area includes Entry and Instant detectors in its
 readiness checks and evaluates a fresh activation whenever that area is armed.
+Each enabled area evaluates a 24-hour zone even while disarmed.
 For example, a contact assigned to House and Garage can raise two independent
 incidents if both areas are armed. Disarming or acknowledging House does not
 disarm or acknowledge Garage. Each area keeps its own entry/exit delays,
 Home/Away mode, schedules, alarm memory and alert actions.
 
-The zone's name, trigger condition, Entry/Instant type, enabled state and
-Home-mode exclusion are shared settings. A cycle bypass applies only to its
+The zone's name, trigger condition, type, enabled state and Home-mode exclusion
+are shared settings. A cycle bypass applies only to its
 selected area. Home exclusion follows each area's own mode, so a zone can be
 excluded in a Home-armed area while still protecting an Away-armed area.
 
@@ -56,7 +74,7 @@ the multiple-area editor.
 
 ## Reading timeout
 
-Open **Security → Settings** to set the reading timeout for all zones. The
+Open **Security → Settings** to set the reading timeout for stateful zones. The
 timeout measures the age of the latest report for each zone's configured
 property. A reading older than the limit makes the zone unknown. Disarm all
 areas before saving a new timeout.
@@ -73,7 +91,7 @@ several per-zone timeouts, the shortest becomes the initial shared value.
   Existing alarm memory must be cleared before another arm cycle.
 - An Entry zone starts the entry countdown. Disarming before it ends cancels
   that pending intrusion. Instant zones can raise an alarm immediately.
-- **Disarm** stops further intrusion evaluation for the area. It retains alarm
+- **Disarm** stops further Entry and Instant alarms for the area. It retains alarm
   memory and its audit trail. An alert already queued for a raised intrusion
   still gets its attempt; disarming during an entry delay creates no intrusion.
 - **Acknowledge** records that an operator has seen the alarm. **Acknowledge all**
@@ -237,9 +255,10 @@ two low pips, and a successful disarm plays three rising chirps. Several area ch
 in the same update share one tone. Loading or reconnecting the page does not
 replay old state changes, and hiding or muting the keypad stops its sound.
 
-When any area shown on the keypad is in live alarm, the open keypad sounds a
-siren. It stops when no shown area remains in live alarm, including when the last
-alarming area is disarmed. Alarm memory remains visible until it is reset.
+With Sound on, an ordinary alarm sounds the keypad siren while its area is armed.
+A 24-hour alarm can sound while disarmed and continues until acknowledged or
+reset, unless **Silent on keypad** is set for that zone. Alarm memory remains
+visible until it is reset.
 
 Interact with the keypad once to allow browser audio. Browsers require a user
 gesture to start or resume sound; see [Web Audio autoplay guidance](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API/Best_practices#autoplay_policy).
