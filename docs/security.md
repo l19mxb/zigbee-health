@@ -12,9 +12,10 @@ The isolated simulation includes synthetic examples and cannot send real alerts.
 2. Open **Zones** and add the devices that protect that area. Search the device
    picker by name, network, model or Zigbee IEEE address. Select one or more
    **Areas** for the zone. Each zone names a device property and the value that
-   means activation. For a typical
-   Zigbee2MQTT contact sensor, `contact: false` means open; for a motion sensor,
-   `occupancy: true` means motion. Check your device's actual reported values.
+   means activation. For a typical Zigbee2MQTT contact sensor, `contact: false`
+   means open. Choose **Motion detected (occupancy)** for `occupancy: true` or
+   **Presence detected (presence)** for `presence: true`, depending on the
+   property your device reports.
 3. Choose **Entry** for an entry route that starts the area's entry delay,
    **Instant** for an immediate alarm while armed, or **24-hour** for an
    immediate alarm in any arming state. Entry and Instant zones can be

@@ -4,8 +4,16 @@ import {Field,Modal} from './ui.jsx';
 const week=[['Sun',0],['Mon',1],['Tue',2],['Wed',3],['Thu',4],['Fri',5],['Sat',6]];
 const modeNames={disarmed:'Disarm',home:'Arm Home',away:'Arm Away'};
 const payloadExample=JSON.stringify({event:'security_alarm',area:'{{area}}',zone:'{{zone}}',device:'{{device}}',mode:'{{mode}}',timestamp:'{{timestamp}}',incidentId:'{{incidentId}}'},null,2);
-const presets={contact:{property:'contact',operator:'eq',value:false},motion:{property:'occupancy',operator:'eq',value:true},vibration:{property:'vibration',operator:'eq',value:true}};
-function zonePreset(item){return Object.entries(presets).find(([,value])=>value.property===item?.property&&value.operator===item?.operator&&value.value===item?.value)?.[0]||'custom';}
+const presets={
+  contact:{label:'Door / window opens',description:'Open',condition:{property:'contact',operator:'eq',value:false}},
+  motion:{label:'Motion detected (occupancy)',description:'Motion detected',condition:{property:'occupancy',operator:'eq',value:true}},
+  presence:{label:'Presence detected (presence)',description:'Presence detected',condition:{property:'presence',operator:'eq',value:true}},
+  vibration:{label:'Vibration detected',description:'Vibration detected',condition:{property:'vibration',operator:'eq',value:true}},
+};
+function zonePreset(item){
+  return Object.entries(presets).find(([, {condition}])=>
+    condition.property===item?.property&&condition.operator===item?.operator&&condition.value===item?.value)?.[0]||'custom';
+}
 const availableDevices=state=>state.eligibleDevices||state.candidates||state.devices||[];
 const memberIds=zone=>Array.isArray(zone?.areaIds)&&zone.areaIds.length?zone.areaIds:zone?.areaId?[zone.areaId]:[];
 const editableArea=area=>area?.mode==='disarmed'&&!['exit_delay','entry_delay'].includes(area.status);
@@ -67,7 +75,11 @@ export function SecurityForm({kind,item,state,areaId,onClose,onSave,onAccount}){
   const label=kind==='area'?'area':kind==='zone'?'zone':kind==='schedule'?'schedule':'alert action';
   const is24Hour=draft.type==='24hour';
   const devices=availableDevices(state),chosenDevice=devices.find(device=>device.id===draft.deviceId);
-  const properties=(chosenDevice?.properties||[]).map(value=>typeof value==='string'?value:value.property).filter(Boolean);
+  const reportedProperties=chosenDevice?.properties||[];
+  const properties=reportedProperties.map(value=>typeof value==='string'?value:value?.property).filter(Boolean);
+  const selectedPreset=presets[preset];
+  const suggestPresence=preset==='motion'&&!properties.includes('occupancy')&&
+    reportedProperties.some(value=>value?.property==='presence'&&value.type==='boolean');
   const membershipLocked=kind==='zone'&&!!item&&(state.incidents||[]).some(incident=>incident.zoneId===item.id&&incident.resetAt==null);
   async function submit(event){
     event.preventDefault();setError('');
@@ -80,7 +92,7 @@ export function SecurityForm({kind,item,state,areaId,onClose,onSave,onAccount}){
       if(!body.areaIds.length){setError('Select at least one area for this zone.');return;}
       const linkedIds=new Set([...memberIds(item),...body.areaIds]);
       if([...linkedIds].some(id=>!editableArea(state.areas.find(area=>area.id===id)))){setError('Disarm every linked area before changing this zone.');return;}
-      if(preset!=='custom')Object.assign(body,presets[preset]);
+      if(selectedPreset)Object.assign(body,selectedPreset.condition);
       else{
         body.value=valueType==='boolean'?customValue==='true':valueType==='number'?Number(customValue):customValue;
         if(valueType==='number'&&(!customValue.trim()||!Number.isFinite(body.value))){setError('Enter a finite activation number.');return;}
@@ -100,6 +112,15 @@ export function SecurityForm({kind,item,state,areaId,onClose,onSave,onAccount}){
     catch(error){setError(error.message);}
     finally{setBusy(false);}
   }
+  function changePreset(next){
+    const condition=(presets[next]||selectedPreset)?.condition;
+    if(condition){
+      setDraft(current=>({...current,...condition}));
+      setValueType(typeof condition.value);
+      setCustomValue(String(condition.value));
+    }
+    setPreset(next);
+  }
   const close=()=>{if(!busy)onClose();};
   return <Modal title={(item?'Edit ':'Add ')+label} onClose={close} wide><form className="security-form" onSubmit={submit}>
     <Field label={kind==='zone'?'Zone name':kind==='area'?'Area name':kind==='schedule'?'Schedule name':'Action name'} required autoFocus maxLength={80} value={draft.name} onChange={e=>change('name',e.target.value)}/>
@@ -110,12 +131,13 @@ export function SecurityForm({kind,item,state,areaId,onClose,onSave,onAccount}){
     </>:kind==='zone'?<AreaMemberships draft={draft} change={change} state={state} locked={membershipLocked}/>:<AreaSelect draft={draft} change={change} state={state}/>}
     {kind==='zone'?<>
       <DevicePicker devices={devices} selectedId={draft.deviceId} fallback={item} onChange={id=>{const device=devices.find(value=>value.id===id);change('deviceId',id);if(!draft.name&&device)change('name',device.name);}}/>
-      <Field label="Activation"><select value={preset} onChange={e=>{const next=e.target.value,condition=presets[next]||presets[preset];if(condition){setDraft(current=>({...current,...condition}));setValueType(typeof condition.value);setCustomValue(String(condition.value));}setPreset(next);}}><option value="contact">Door / window opens</option><option value="motion">Motion / presence detected</option><option value="vibration">Vibration detected</option><option value="custom">Custom condition</option></select></Field>
-      {preset!=='custom'?<p className="security-condition-preview">{preset==='contact'?'Open (contact = false)':preset==='motion'?'Motion detected (occupancy = true)':'Vibration detected (vibration = true)'}</p>:<>
+      <Field label="Activation"><select value={preset} onChange={event=>changePreset(event.target.value)}>{Object.entries(presets).map(([id,{label}])=><option key={id} value={id}>{label}</option>)}<option value="custom">Custom condition</option></select></Field>
+      {selectedPreset?<p className="security-condition-preview">{selectedPreset.description} ({selectedPreset.condition.property} = {String(selectedPreset.condition.value)})</p>:<>
         <Field label="Activation property" hint="Choose a reported property or enter its exact name."><input required list="security-zone-properties" maxLength={80} value={draft.property} onChange={e=>change('property',e.target.value)}/></Field><datalist id="security-zone-properties">{properties.map(property=><option key={property} value={property}/>)}</datalist>
         <div className="security-field-pair"><Field label="Condition"><select value={draft.operator} onChange={e=>{change('operator',e.target.value);if(!['eq','ne'].includes(e.target.value)&&valueType!=='number'){setValueType('number');setCustomValue('');}}}><option value="eq">Equals</option><option value="ne">Does not equal</option><option value="gt">Greater than</option><option value="gte">At least</option><option value="lt">Less than</option><option value="lte">At most</option></select></Field><Field label="Value type"><select value={valueType} onChange={e=>{setValueType(e.target.value);setCustomValue(e.target.value==='boolean'?'true':'');if(e.target.value!=='number'&&!['eq','ne'].includes(draft.operator))change('operator','eq');}}><option value="boolean">On / off</option><option value="number">Number</option><option value="string">Text</option></select></Field></div>
         <Field label="Activation value">{valueType==='boolean'?<select value={customValue} onChange={e=>setCustomValue(e.target.value)}><option value="true">True</option><option value="false">False</option></select>:<input required type={valueType==='number'?'number':'text'} step={valueType==='number'?'any':undefined} maxLength={200} value={customValue} onChange={e=>setCustomValue(e.target.value)}/>}</Field>
       </>}
+      {suggestPresence?<p className="security-condition-preview">This device reported <code>presence</code>. Choose <strong>{presets.presence.label}</strong> to use that reading.</p>:null}
       <Field label="Zone type" hint={is24Hour?'Raises an immediate alarm when activated, even while disarmed. Uses the area’s configured alert actions.':undefined}><select value={draft.type} onChange={e=>change('type',e.target.value)}><option value="instant">Instant</option><option value="entry">Entry</option><option value="24hour">24-hour</option></select></Field>
       {is24Hour?<><p className="small muted">For a button, choose Custom condition and set the <code>action</code> property to equal a text value the device reports, such as <code>single</code>.</p>
         <Check checked={draft.silent===true} onChange={value=>change('silent',value)}>Silent on keypad</Check>

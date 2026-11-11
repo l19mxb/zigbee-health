@@ -2,7 +2,7 @@ name: zigbee-health
 services:
   dashboard:
     build: .
-    image: zigbee-health:0.13.1
+    image: zigbee-health:0.13.2
     container_name: zigbee-health
     init: true
     restart: unless-stopped
