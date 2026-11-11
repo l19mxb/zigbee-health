@@ -36,6 +36,7 @@ function EmptyPanel({title,children,action}){return <div className="security-emp
 
 export default function Security({permissions={},demo=false,onAccount,openIncidentId,openRequestKey=0}){
   const [state,setState]=useState(null),[error,setError]=useState(''),[loading,setLoading]=useState(true),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[tab,setTab]=useState('overview'),[areaId,setAreaId]=useState(''),[dialog,setDialog]=useState(null),[clock,setClock]=useState(Date.now());
+  const [acknowledgeError,setAcknowledgeError]=useState('');
   const active=useRef(null),received=useRef(Date.now()),openedIncident=useRef(null),openRefresh=useRef(null);
   async function refresh(){
     active.current?.abort();const controller=new AbortController();active.current=controller;
@@ -56,12 +57,21 @@ export default function Security({permissions={},demo=false,onAccount,openIncide
     if(incident&&(state.areas||[]).some(area=>area.id===incident.areaId))setAreaId(incident.areaId);
     else setMessage('The requested security alarm is no longer in the available history. Showing the current overview.');
   },[state,openIncidentId,openRequestKey]);
-  async function save(route,body){
+  async function save(route,body,successMessage){
     if(error)throw Error('Reconnect to security before applying this change.');
     setBusy(true);setMessage('');
-    try{const result=await request(route,body);await refresh();setDialog(null);setMessage(route==='security/settings'?'Zone reading timeout saved.':route.includes('command')?'Area command applied.':route.includes('bypass')?'Zone bypass updated.':'Security configuration saved.');return result;}
+    try{const result=await request(route,body);await refresh();setDialog(null);setMessage(successMessage?successMessage(result):route==='security/settings'?'Zone reading timeout saved.':route.includes('command')?'Area command applied.':route.includes('bypass')?'Zone bypass updated.':'Security configuration saved.');return result;}
     catch(cause){if(route==='security/settings'&&cause.status===409)await refresh();throw cause;}
     finally{setBusy(false);}
+  }
+  async function acknowledgeAll(){
+    if(busy||error)return;
+    setAcknowledgeError('');
+    try{
+      await save('security/acknowledge-all',{},result=>result.acknowledged
+        ?'Acknowledged '+plural(result.acknowledged,'security alarm')+'.'
+        :'No security alarms needed acknowledgement.');
+    }catch(cause){setAcknowledgeError(cause.message);}
   }
   if(!state)return <div className="security-loading" role={error?'alert':'status'}>{loading?'Opening security…':error}{error?<button onClick={refresh}>Try again</button>:null}</div>;
   const areas=state.areas||[],zones=state.zones||[],selected=areas.find(area=>area.id===areaId)||areas[0]||null;
@@ -82,7 +92,8 @@ export default function Security({permissions={},demo=false,onAccount,openIncide
         </section>
         {selected?<AreaPanel area={selected} zones={zonesForArea(zones,selected.id)} incidents={safeState.incidents.filter(incident=>incident.areaId===selected.id&&incident.resetAt==null)} now={now} control={control&&!error&&!busy} manage={manage&&!error&&!busy} removeAllowed={areaRemovable(selected,zones,currentAreas,safeState.incidents)} onCommand={openCommand} onEdit={()=>openForm('area',selected)} onRemove={()=>setDialog({type:'remove',kind:'area',item:selected})} onZones={()=>setTab('zones')}/>:<section className="security-area-panel"><EmptyPanel title="Create your first security area" action={manage?<button className="primary" onClick={()=>openForm('area')} disabled={busy||!!error}>Add area</button>:null}>{manage?'Add an area, then select its Zigbee devices as zones. New areas start disarmed.':'An administrator can add areas and assign devices as security zones.'}</EmptyPanel></section>}
       </div>
-      <SecurityAlarmStack state={safeState} areas={currentAreas} control={control&&!busy&&!error} onCommand={openCommand}/>
+      <SecurityAlarmStack state={safeState} areas={currentAreas} control={control&&!busy&&!error} onCommand={openCommand}
+        onAcknowledgeAll={control?acknowledgeAll:undefined} acknowledgeError={acknowledgeError}/>
       <RecentActivity state={safeState} areas={currentAreas}/>
     </>:tab==='zones'?<Zones state={safeState} manage={manage&&!busy&&!error} control={control&&!busy&&!error} onAdd={()=>openForm('zone')} onEdit={item=>openForm('zone',item)} onRemove={item=>setDialog({type:'remove',kind:'zone',item})} onBypass={(item,clear)=>setDialog({type:'bypass',item,clear})}/>:tab==='schedules'?<Schedules state={safeState} manage={manage&&!busy&&!error} onAdd={()=>openForm('schedule')} onEdit={item=>openForm('schedule',item)} onRemove={item=>setDialog({type:'remove',kind:'schedule',item})}/>:tab==='actions'?<AlertActions state={safeState} manage={manage&&!busy&&!error} onAdd={()=>openForm('action')} onEdit={item=>openForm('action',item)} onRemove={item=>setDialog({type:'remove',kind:'action',item})}/>:<SecuritySettings timeout={state.readingTimeoutMin} canChange={state.canChangeReadingTimeout===true} manage={manage} busy={busy} disconnected={!!error} onSave={save}/>}
     {demo?<p className="security-demo-note"><Icon name="flask" size={15}/>Simulation only. Security actions do not publish MQTT messages or send email.</p>:null}
@@ -160,11 +171,18 @@ function AreaPanel({area,zones,incidents,now,control,manage,removeAllowed,onComm
   </section>;
 }
 
-function SecurityAlarmStack({state,areas,control,onCommand}){
+function SecurityAlarmStack({state,areas,control,onCommand,onAcknowledgeAll,acknowledgeError}){
   const incidents=state.incidents.filter(incident=>incident.resetAt===null||incident.resetAt===undefined);
+  const unacknowledged=incidents.some(incident=>incident.ackAt==null&&areas.has(incident.areaId));
   const canResetArea=id=>areas.get(id)?.mode==='disarmed'&&incidents.filter(incident=>incident.areaId===id).every(incident=>incident.ackAt)&&zonesForArea(state.zones,id).every(zone=>zone.ready);
   const table=useTable(incidents.map(incident=>({...incident,name:incident.zoneName||incident.deviceName||'Zone',areaName:incident.areaName||areas.get(incident.areaId)?.name||'Removed area',networkLabel:[incident.areaName,incident.zoneName,incident.deviceName,incident.description].join(' '),alarmState:incident.ackAt?'Acknowledged':'Unacknowledged'})),'raisedAt');
-  return <section className="security-section security-alarm-stack" aria-label="Security alarm stack"><PanelHeading title="Security alarm stack" count={incidents.length||undefined}/>{incidents.length?<><div className="table-scroll security-table"><table><thead><tr><SortHead column="raisedAt" table={table}>Raised</SortHead><SortHead column="areaName" table={table}>Area / zone</SortHead><SortHead column="alarmState" table={table}>State</SortHead><th>Actions</th></tr></thead><tbody>{table.rows.map(incident=><tr key={incident.id}><td>{date(incident.raisedAt,true)}</td><td><strong>{incident.areaName}</strong><span className="row-subtitle">{incident.name}</span></td><td><Badge tone={incident.ackAt?'acknowledged':'critical'}>{incident.alarmState}</Badge>{incident.restoredAt?<span className="security-restored">Zone restored</span>:null}</td><td><div className="record-actions">{areas.get(incident.areaId)&&control?<><button disabled={!!incident.ackAt} onClick={()=>onCommand('acknowledge',areas.get(incident.areaId))}>Acknowledge</button><button disabled={!canResetArea(incident.areaId)} onClick={()=>onCommand('reset',areas.get(incident.areaId))}>Reset memory</button></>:<span className="muted">—</span>}</div></td></tr>)}</tbody></table></div>{incidents.length>10?<Pagination total={table.filtered.length} {...table}/>:null}</>:<div className="security-clear-state"><Icon name="check" size={24}/><p>No active <strong>security alarms</strong></p></div>}</section>;
+  return <section className="security-section security-alarm-stack" aria-label="Security alarm stack">
+    <PanelHeading title="Security alarm stack" count={incidents.length||undefined}>
+      {onAcknowledgeAll?<button type="button" disabled={!control||!unacknowledged} onClick={onAcknowledgeAll}>Acknowledge all</button>:null}
+    </PanelHeading>
+    {acknowledgeError?<p className="notice critical" role="alert">{acknowledgeError}</p>:null}
+    {incidents.length?<><div className="table-scroll security-table"><table><thead><tr><SortHead column="raisedAt" table={table}>Raised</SortHead><SortHead column="areaName" table={table}>Area / zone</SortHead><SortHead column="alarmState" table={table}>State</SortHead><th>Actions</th></tr></thead><tbody>{table.rows.map(incident=><tr key={incident.id}><td>{date(incident.raisedAt,true)}</td><td><strong>{incident.areaName}</strong><span className="row-subtitle">{incident.name}</span></td><td><Badge tone={incident.ackAt?'acknowledged':'critical'}>{incident.alarmState}</Badge>{incident.restoredAt?<span className="security-restored">Zone restored</span>:null}</td><td><div className="record-actions">{areas.get(incident.areaId)&&control?<><button disabled={!!incident.ackAt} onClick={()=>onCommand('acknowledge',areas.get(incident.areaId))}>Acknowledge</button><button disabled={!canResetArea(incident.areaId)} onClick={()=>onCommand('reset',areas.get(incident.areaId))}>Reset memory</button></>:<span className="muted">—</span>}</div></td></tr>)}</tbody></table></div>{incidents.length>10?<Pagination total={table.filtered.length} {...table}/>:null}</>:<div className="security-clear-state"><Icon name="check" size={24}/><p>No active <strong>security alarms</strong></p></div>}
+  </section>;
 }
 
 function RecentActivity({state,areas}){

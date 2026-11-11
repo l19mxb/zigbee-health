@@ -85,6 +85,15 @@ test('view, control and configuration permissions are independently enforced and
     for(const [route,body] of configs)assert.ok([200,201].includes((await f.request(route,{...body,actor:'admin'},manager.cookie)).status),route);
     assert.deepEqual(f.calls.find(call=>call.method==='command').args,['area-one','arm_away',{reason:'Leaving'},'security-controller']);
     for(const call of f.calls.filter(call=>call.method!=='command'&&call.method!=='bypassZone'&&call.method!=='clearBypass'))assert.equal(call.args.at(-1),'security-manager',call.method);
+    const bulkActors=[],bulkRoute='security/acknowledge-all';
+    f.security.acknowledgeAll=actor=>{bulkActors.push(actor);return 3;};
+    assert.equal((await f.request(bulkRoute,{})).status,401);
+    for(const cookie of [reader.cookie,manager.cookie])assert.equal((await f.request(bulkRoute,{},cookie)).status,403);
+    assert.equal((await f.request(bulkRoute,{},controller.cookie,{Origin:'https://other.fixture.test'})).status,403);
+    assert.equal((await f.request(bulkRoute,{areaId:'area-one',actor:'admin'},controller.cookie)).status,400);
+    const bulk=await f.request(bulkRoute,{},controller.cookie);
+    assert.equal(bulk.status,200);assert.deepEqual(bulk.body,{acknowledged:3});
+    assert.deepEqual(bulkActors,['security-controller']);
     const flags=(await f.request('state',undefined,controller.cookie)).body.permissions;assert.equal(flags.viewSecurity,true);assert.equal(flags.controlSecurity,true);assert.equal(flags.manageSecurity,false);assert.equal(flags.viewHealth,false);
   }finally{await f.close();}
 });

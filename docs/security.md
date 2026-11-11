@@ -79,8 +79,10 @@ several per-zone timeouts, the shortest becomes the initial shared value.
 - **Disarm** stops further intrusion evaluation for the area. It retains alarm
   memory and its audit trail. An alert already queued for a raised intrusion
   still gets its attempt; disarming during an entry delay creates no intrusion.
-- **Acknowledge** records that an operator has seen the alarm. **Reset** clears
-  working alarm memory after the area is disarmed. These are separate actions.
+- **Acknowledge** records that an operator has seen the alarm. **Acknowledge all**
+  in the Security alarm stack applies to all outstanding acknowledgements across
+  the stack, including other pages. **Reset** clears working alarm memory after
+  the area is disarmed and its zones are ready.
 - A zone can be bypassed for a chosen time or indefinitely, with a reason. Its
   real status and the bypass remain visible. Ending a bypass does not manufacture
   a new sensor activation.

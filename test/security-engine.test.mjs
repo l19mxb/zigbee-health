@@ -34,6 +34,51 @@ test('fresh normal-to-active edge raises one latched incident and one action per
 
 test('restore, acknowledge, disarm and reset remain separate and accountable',()=>{const f=fixture();f.normal();f.arm();f.report('door',{contact:false});f.e.command(f.area.id,'acknowledge',{},'operator');assert.ok(f.e.activeIncidents()[0].ackAt);assert.equal(f.e.activeIncidents()[0].ackBy,'operator');assert.equal(f.e.state().areas[0].mode,'away');assert.throws(()=>f.e.command(f.area.id,'reset',{},'operator'),/Disarm/);f.e.command(f.area.id,'disarm',{},'operator');assert.equal(f.e.activeIncidents().length,1);assert.throws(()=>f.e.command(f.area.id,'reset',{},'operator'),/Restore/);f.report('door',{contact:true});f.e.command(f.area.id,'reset',{},'operator');assert.equal(f.e.activeIncidents().length,0);assert.equal(f.e.state().areas[0].status,'disarmed');assert.ok(f.e.state().events.some(event=>event.actor==='operator'&&event.type==='alarm_reset'));f.close();});
 
+test('acknowledging the entire Security stack is atomic and preserves reset history, modes and deliveries',()=>{
+  const f=fixture();try{
+    f.normal();f.action();f.arm();f.report('door',{contact:false});
+    const historical=f.e.activeIncidents()[0].id;
+    f.e.command(f.area.id,'acknowledge',{},'original operator');
+    f.e.command(f.area.id,'disarm',{},'tester');f.normal();
+    f.e.command(f.area.id,'reset',{},'tester');
+    f.s.run('UPDATE security_incidents SET ack_at=NULL,ack_by=NULL WHERE id=?',historical);
+    const annex=f.e.saveArea({name:'Annex',entryDelaySec:0,exitDelaySec:0},'tester');
+    for(const zone of [f.door,f.motion])f.e.saveZone({id:zone.id,areaIds:[f.area.id,annex.id]},'tester');
+    f.normal();f.arm();f.e.command(annex.id,'arm_away',{},'tester');
+    f.report('motion',{occupancy:true});
+    f.e.command(f.area.id,'acknowledge',{},'original operator');
+    f.advance(100);f.report('door',{contact:false});
+    f.e.command(annex.id,'disarm',{},'tester');
+    const incidents=()=>f.s.all('SELECT * FROM security_incidents ORDER BY id').map(row=>({...row}));
+    const events=()=>f.s.all('SELECT * FROM security_events ORDER BY id');
+    const retained=()=>({
+      areas:f.s.all('SELECT * FROM security_areas ORDER BY id'),
+      deliveries:f.s.all('SELECT * FROM security_deliveries ORDER BY id'),
+      pushDeliveries:f.s.all('SELECT * FROM security_push_deliveries ORDER BY id')
+    });
+    const before=incidents(),beforeEvents=events(),beforeRetained=retained();
+    const event=f.e.event.bind(f.e);
+    f.e.event=(type,message,scope)=>{
+      const id=event(type,message,scope);
+      if(type==='alarm_acknowledged'&&scope.areaId===annex.id)throw Error('Synthetic acknowledgement audit failure');
+      return id;
+    };
+    assert.throws(()=>f.e.acknowledgeAll('stack operator'),/Synthetic acknowledgement audit failure/);
+    assert.deepEqual(incidents(),before);assert.deepEqual(events(),beforeEvents);
+    f.e.event=event;
+    assert.equal(f.e.acknowledgeAll('stack operator'),3);
+    assert.deepEqual(incidents(),before.map(row=>row.reset_at===null&&row.ack_at===null?{...row,ack_at:f.now(),ack_by:'stack operator'}:row));
+    assert.deepEqual(retained(),beforeRetained);
+    const addedEvents=events().slice(beforeEvents.length);
+    assert.equal(addedEvents.length,2);
+    assert.deepEqual(new Set(addedEvents.map(row=>row.area_id)),new Set([f.area.id,annex.id]));
+    assert.ok(addedEvents.every(row=>row.type==='alarm_acknowledged'&&row.actor==='stack operator'));
+    f.advance(100);
+    assert.equal(f.e.acknowledgeAll('retry operator'),0);
+    assert.deepEqual(events().slice(beforeEvents.length),addedEvents);
+  }finally{f.close();}
+});
+
 test('Home excludes selected internal zones while Away includes them',()=>{const f=fixture();f.normal();f.report('motion',{occupancy:true});assert.equal(f.e.state().areas[0].readyAway,false);assert.equal(f.e.state().areas[0].readyHome,true);f.arm('home');f.report('motion',{occupancy:false});f.report('motion',{occupancy:true});assert.equal(f.e.activeIncidents().length,0);f.report('door',{contact:false});assert.equal(f.e.activeIncidents().length,1);f.close();});
 
 test('arming cannot declare protection when every enabled zone is bypassed or excluded in Home',()=>{const f=fixture();f.normal();f.e.bypassZone(f.door.id,{durationMin:null,reason:'Fixture bypass'},'operator');f.e.bypassZone(f.motion.id,{durationMin:null,reason:'Fixture bypass'},'operator');assert.equal(f.e.state().areas[0].includedCount,0);assert.equal(f.e.state().areas[0].readyAway,false);assert.throws(()=>f.arm(),/remain protected/);f.e.clearBypass(f.door.id,'operator');f.e.clearBypass(f.motion.id,'operator');f.e.saveZone({id:f.door.id,homeBypass:true},'operator');assert.equal(f.e.state().areas[0].readyHome,false);assert.throws(()=>f.arm('home'),/remain protected/);assert.equal(f.e.state().areas[0].mode,'disarmed');f.close();});

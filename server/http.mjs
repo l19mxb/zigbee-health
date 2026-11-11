@@ -16,7 +16,7 @@ const previewUser={id:'local-preview',username:'admin',displayName:'Local previe
 const adminChanges=new Set(['/api/users','/api/users/update','/api/users/reset-password','/api/users/revoke-sessions','/api/users/keypad','/api/kiosk/settings']);
 const routeFeatures=new Map([['/api/thresholds','manageThresholds'],['/api/device','manageDevices'],['/api/networks','manageBrokers'],['/api/email','manageEmail'],['/api/push/settings','manageNotifications'],...['retire','restore','delete-history','link','unlink'].map(action=>['/api/devices/'+action,'manageDevices']),...['acknowledge','process','process-all'].map(action=>['/api/alarms/'+action,'acknowledge']),['/api/shunts','manageShunts'],['/api/shunts/cancel','manageShunts']]);
 for(const route of ['areas','zones','schedules','actions','settings','remove-area','remove-zone','remove-schedule','remove-action','areas/delete','zones/delete','schedules/delete','actions/delete'])routeFeatures.set('/api/security/'+route,'manageSecurity');
-for(const route of ['command','bypass','clear-bypass','zones/bypass','zones/clear-bypass'])routeFeatures.set('/api/security/'+route,'controlSecurity');
+for(const route of ['command','acknowledge-all','bypass','clear-bypass','zones/bypass','zones/clear-bypass'])routeFeatures.set('/api/security/'+route,'controlSecurity');
 routeFeatures.set('/api/security/push-test','viewSecurity');
 routeFeatures.set('/api/keypad/command','viewSecurity');
 const personalChanges=new Set(['/api/logout','/api/account/password','/api/account/keypad','/api/push/subscribe','/api/push/remove','/api/push/test']);
@@ -137,6 +137,10 @@ export function createApp(engine,{collectors=null,push=null,security=null,securi
         return json(res,200,{...state,currentUser:user,permissions});
       }
       if(route==='/api/security/command'&&req.method==='POST'){if(Object.keys(body).some(key=>!['areaId','action','reason','actor'].includes(key)))throw new KeypadError('Use the Keypad bypass preview before bypass arming');return json(res,200,{ok:true,area:security.command(body.areaId,body.action,{reason:body.reason},actor)});}
+      if(route==='/api/security/acknowledge-all'&&req.method==='POST'){
+        if(Object.keys(body).length)return json(res,400,{error:'Acknowledge all security alarms does not take any fields'});
+        return json(res,200,{acknowledged:security.acknowledgeAll(actor)});
+      }
       if(route==='/api/security/settings'&&req.method==='POST')return json(res,200,security.saveSettings(body,actor));
       if(route==='/api/security/push-test'&&req.method==='POST')return json(res,200,await push.securityTest(body.subscriptionId,accounts.active()?user.id:null));
       if(['/api/security/bypass','/api/security/zones/bypass'].includes(route)&&req.method==='POST')return json(res,200,{ok:true,zone:security.bypassZone(body.id,{durationMin:body.durationMin,reason:body.reason},actor)});

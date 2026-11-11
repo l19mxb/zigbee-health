@@ -284,6 +284,19 @@ export class SecurityEngine {
       this.event(area.exitDelaySec?'exit_started':'area_armed',area.name+(area.exitDelaySec?' exit delay started':' armed '+mode),{areaId:area.id,actor});
     });return this.areaView(area);
   }
+  #auditAcknowledgement(area,actor){
+    this.event('alarm_acknowledged',area.name+' alarm memory acknowledged',{areaId:area.id,actor});
+  }
+  acknowledgeAll(actor='System'){
+    actor=actorName(actor);
+    return this.s.transaction(()=>{
+      const incidents=this.s.all(`UPDATE security_incidents SET ack_at=?,ack_by=?
+        WHERE reset_at IS NULL AND ack_at IS NULL AND area_id IN (SELECT id FROM security_areas)
+        RETURNING area_id`,this.now(),actor);
+      for(const id of new Set(incidents.map(incident=>incident.area_id)))this.#auditAcknowledgement(this.requireArea(id),actor);
+      return incidents.length;
+    });
+  }
   command(areaId,command,options={},actor='System'){
     if(command&&typeof command==='object'){actor=typeof options==='string'?options:actor;options=command;command=options.action;}
     object(options,['action','reason']);actor=actorName(actor);let area=this.requireArea(areaId);
@@ -292,7 +305,7 @@ export class SecurityEngine {
       this.s.transaction(()=>{this._saveArea(this.clearCycleExceptions({...area,mode:'disarmed',targetMode:null,exitAt:null,entryAt:null,pendingZoneId:null,armedAt:null}));this.event('area_disarmed',area.name+' disarmed'+(options.reason?': '+text(options.reason,'Reason',300):''),{areaId,actor});});return this.areaView(this.requireArea(areaId));
     }
     if(command==='acknowledge'){
-      this.s.transaction(()=>{this.s.run('UPDATE security_incidents SET ack_at=?,ack_by=? WHERE area_id=? AND reset_at IS NULL AND ack_at IS NULL',this.now(),actor,areaId);this.event('alarm_acknowledged',area.name+' alarm memory acknowledged',{areaId,actor});});return this.areaView(area);
+      this.s.transaction(()=>{this.s.run('UPDATE security_incidents SET ack_at=?,ack_by=? WHERE area_id=? AND reset_at IS NULL AND ack_at IS NULL',this.now(),actor,areaId);this.#auditAcknowledgement(area,actor);});return this.areaView(area);
     }
     if(command==='reset'){
       requireValue(area.mode==='disarmed'&&!area.targetMode,'Disarm this area before resetting alarm memory');
