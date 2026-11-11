@@ -38,11 +38,8 @@ disarm or acknowledge Garage. Each area keeps its own entry/exit delays,
 Home/Away mode, schedules, alarm memory and alert actions.
 
 The zone's name, trigger condition, Entry/Instant type, enabled state and
-Home-mode exclusion are shared settings. A manual timed or
-indefinite bypass in the Security panel also applies to the zone in **every
-assigned area**; the panel warns about that scope before applying it. The
-keypad's **Bypass and arm** confirmation instead applies only to the selected
-area's current arm cycle. Home exclusion follows each area's own mode, so a zone can be
+Home-mode exclusion are shared settings. A cycle bypass applies only to its
+selected area. Home exclusion follows each area's own mode, so a zone can be
 excluded in a Home-armed area while still protecting an Away-armed area.
 
 Disarm every linked area before changing or removing a shared zone. Adding it
@@ -83,13 +80,30 @@ several per-zone timeouts, the shortest becomes the initial shared value.
   in the Security alarm stack applies to all outstanding acknowledgements across
   the stack, including other pages. **Reset** clears working alarm memory after
   the area is disarmed and its zones are ready.
-- A zone can be bypassed for a chosen time or indefinitely, with a reason. Its
-  real status and the bypass remain visible. Ending a bypass does not manufacture
-  a new sensor activation.
 
 Area configuration is changed while the area is disarmed. Removing an area also
 requires all areas sharing its zones to be disarmed. The Security panel uses
 the signed-in account. The separate Keypad page uses the PIN flow described below.
+
+## Bypass a zone for one arming cycle
+
+Open **Security → Zones** and use the zone's action in the **Actions** column.
+For a shared zone, select the area that needs the bypass when several are eligible.
+
+- For a disarmed area, **Bypass for Arm Away** opens Keypad with the zone selected
+  for the next Away review. Open the review with **Arm away** or **Force Arm**
+  and confirm the zones listed. The bypass takes effect when that arm is accepted.
+- For an area already armed Home or Away, confirm **Bypass until disarm** to exclude
+  the zone from that area's current cycle. This requires the area to be outside
+  entry and exit delays, with no alarm memory and another included zone.
+
+The bypass ends when its area disarms. Keypad continues to show open and troubled
+zones, including bypassed ones. The keypad selection applies only to the reviewed
+manual Away command. Scheduled arming follows its normal readiness checks.
+
+Previously saved manual bypasses follow their existing expiry. Use
+**Clear manual bypass** to end one early. Older manual bypasses apply across
+all the zone's linked areas.
 
 ## Schedules
 

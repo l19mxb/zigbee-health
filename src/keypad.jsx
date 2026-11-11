@@ -9,6 +9,7 @@ const count=(number,word)=>number+' '+word+(number===1?'':'s');
 const editable=area=>area.mode==='disarmed'&&!['exit_delay','entry_delay'].includes(area.status);
 const mayBypassForForce=zone=>zone.status==='active'&&zone.trouble===null;
 const mayAwaitForForce=zone=>zone.status==='unknown'&&zone.awaitingReading===true;
+const cycleZoneCandidates=area=>area.bypassCandidates??area.blockingZones??[];
 
 function armingPlan(areas,force,bypassIds){
   if(!areas.length)return {block:'Select areas to arm.'};
@@ -20,12 +21,12 @@ function armingPlan(areas,force,bypassIds){
     if(!area.enabled)return {block:area.name+' is disabled.'};
     if(area.activeAlarmCount)return {block:'Reset alarm memory in '+area.name+' before arming.'};
     if(!area.zoneCount)return {block:'Add an enabled zone to '+area.name+' before arming.'};
-    const blockingZones=[],awaitingZones=[];
+    const blockingZones=cycleZoneCandidates(area).filter(zone=>selectedBypasses.has(zone.id)),awaitingZones=[];
+    const excluded=new Set(blockingZones.map(zone=>zone.id));
+    for(const id of excluded)matched.add(id);
     for(const zone of area.blockingZones||[]){
-      if(selectedBypasses.has(zone.id)){
-        matched.add(zone.id);
-        blockingZones.push(zone);
-      }else if(force&&mayBypassForForce(zone)){
+      if(excluded.has(zone.id))continue;
+      if(force&&mayBypassForForce(zone)){
         blockingZones.push(zone);
       }else if(force&&mayAwaitForForce(zone)){
         awaitingZones.push(zone);
@@ -37,7 +38,7 @@ function armingPlan(areas,force,bypassIds){
     if(!(protectedZoneCount>0))return {block:'Keep at least one included zone in '+area.name+'.'};
     planned.push({id:area.id,blockingZones,awaitingZones,protectedZoneCount});
   }
-  if(matched.size!==selectedBypasses.size)return {block:'A selected bypass is no longer needed. Review the current zones.'};
+  if(matched.size!==selectedBypasses.size)return {block:'A selected zone is no longer available to bypass. Review the current zones.'};
   return {areas:planned};
 }
 function indicator(area){
@@ -74,7 +75,7 @@ function reviewSignature(areas){
 }
 const draftSignature=areas=>JSON.stringify(areas.map(area=>({id:area.id,editable:editable(area),
   enabled:area.enabled,activeAlarmCount:area.activeAlarmCount,includedCount:area.includedCount,
-  blockers:zoneConditions(area.blockingZones||[])})).sort((a,b)=>a.id.localeCompare(b.id)));
+  blockers:zoneConditions(area.blockingZones||[]),candidates:cycleZoneCandidates(area).map(zone=>zone.id).sort()})).sort((a,b)=>a.id.localeCompare(b.id)));
 const armingContext=value=>JSON.stringify({ids:(value.areas||[]).map(area=>area.id).sort(),revision:value.armingRevision||null,canArm:!!value.canArm,canBypassArm:!!value.canBypassArm,canForceArm:!!value.canForceArm,readOnly:!!value.readOnly});
 function draftMatches(draft,value){
   if(!value?.canArm||!value.canBypassArm||value.readOnly||value.armingRevision!==draft.revision)return false;
@@ -95,7 +96,7 @@ function CycleBypasses({areas}){
   return <section className="keypad-cycle-bypasses" aria-label="Current arming cycle bypasses">{active.map(area=>{const number=area.cycleBypassCount??area.cycleBypasses.length;return <div key={area.id}><strong>{area.name} · {number} cycle {number===1?'bypass':'bypasses'}</strong><span>{(area.cycleBypasses||[]).map(zone=>zone.name).join(', ')}</span></div>;})}<p>These zones remain excluded until their area disarms.</p></section>;
 }
 function ReviewZones({title,zones}){
-  return <><h4>{title}</h4><ul>{zones.map(zone=><li key={zone.id}><strong>{zone.name}</strong><span>{zone.trouble||(zone.status==='unknown'?'Waiting for a fresh reading':'Open / active')}</span></li>)}</ul></>;
+  return <><h4>{title}</h4><ul>{zones.map(zone=><li key={zone.id}><strong>{zone.name}</strong><span>{zone.trouble||(zone.status==='normal'?'Closed / normal':zone.status==='unknown'?'Waiting for a fresh reading':'Open / active')}</span></li>)}</ul></>;
 }
 function ArmBypassReview({review,now,busy,onClose,onConfirm}){
   const force=review.intent==='force';
@@ -125,10 +126,11 @@ function PinPad({pin,onChange,disabled,onPhysicalKey}){
   </div><div className="keypad-digits" aria-label="PIN keypad">{[1,2,3,4,5,6,7,8,9].map(number=><button key={number} type="button" aria-label={'PIN digit '+number} disabled={disabled||pin.length===4} onClick={()=>onChange(pin+number)}>{number}</button>)}<button type="button" className="keypad-edit-digit" disabled={disabled||!pin} onClick={()=>onChange('')}>Clear</button><button type="button" aria-label="PIN digit 0" disabled={disabled||pin.length===4} onClick={()=>onChange(pin+'0')}>0</button><button type="button" className="keypad-edit-digit" aria-label="Backspace PIN digit" disabled={disabled||!pin} onClick={()=>onChange(pin.slice(0,-1))}>Backspace</button></div></div>;
 }
 
-export default function Keypad({onSecurity,kiosk=false,requestApi=request}){
+export default function Keypad({onSecurity,initialBypass,kiosk=false,requestApi=request}){
   const [soundEnabled,setSoundEnabled]=useState(()=>readKeypadSound()),[soundStatus,setSoundStatus]=useState({unlocked:false,supported:null});
   const [state,setState]=useState(null),[loading,setLoading]=useState(true),[connectionError,setConnectionError]=useState(''),[commandError,setCommandError]=useState(''),[message,setMessage]=useState(''),[busy,setBusy]=useState(false),[selection,setSelection]=useState(null),[pin,setPin]=useState(''),[carousel,setCarousel]=useState(0),[dialog,setDialog]=useState(null),[clock,setClock]=useState(Date.now()),[armReview,setArmReview]=useState(null);
   const [bypassDraft,setBypassDraft]=useState(null);
+  const requestedBypass=useRef(initialBypass);
   const pending=useRef(null),received=useRef(Date.now()),context=useRef(null),latestState=useRef(null),reviewRef=useRef(null),draftRef=useRef(null),reviewEpoch=useRef(0),reviewFlight=useRef(false),sound=useRef(null);
   function feedback(method,value){try{return sound.current?.[method](value);}catch{/* Audio never changes keypad operations. */}}
   useEffect(()=>{const audio=createKeypadAudio({enabled:soundEnabled,visible:!document.hidden,onStatus:setSoundStatus});sound.current=audio;const visibility=()=>audio.setVisible(!document.hidden),hide=()=>audio.setVisible(false),sync=event=>{if(event.key===keypadSoundKey||event.key===null){const enabled=readKeypadSound();setSoundEnabled(enabled);audio.setEnabled(enabled);}};document.addEventListener('visibilitychange',visibility);window.addEventListener('pagehide',hide);window.addEventListener('pageshow',visibility);window.addEventListener('storage',sync);return()=>{audio.destroy();if(sound.current===audio)sound.current=null;document.removeEventListener('visibilitychange',visibility);window.removeEventListener('pagehide',hide);window.removeEventListener('pageshow',visibility);window.removeEventListener('storage',sync);};},[]);
@@ -149,12 +151,22 @@ export default function Keypad({onSecurity,kiosk=false,requestApi=request}){
       if(draftRef.current&&!draftMatches(draftRef.current,value)||reviewRef.current&&!reviewMatches(reviewRef.current,value)){
         discardReview();updateBypassDraft(null);setCommandError('Zone conditions changed. Review the zones again before arming.');
       }
+      if(requestedBypass.current){
+        const {areaId,zoneId}=requestedBypass.current;
+        requestedBypass.current=null;
+        const area=value.areas?.find(item=>item.id===areaId);
+        if(area)setSelection([area.id]);
+        if(area&&value.canArm&&value.canBypassArm&&!value.readOnly&&typeof value.armingRevision==='string'&&
+          editable(area)&&area.enabled&&!area.activeAlarmCount&&cycleZoneCandidates(area).some(zone=>zone.id===zoneId)){
+          updateBypassDraft({zoneIds:[zoneId],areaIds:[area.id],revision:value.armingRevision,signature:draftSignature([area])});
+        }else setCommandError('This zone is no longer available to bypass for the selected area.');
+      }
       received.current=Date.now();setState(value);setConnectionError('');return value;
     }
     catch(error){if(error.name!=='AbortError'){feedback('disconnect');setConnectionError(error.message);discardReview();updateBypassDraft(null);if(kiosk){latestState.current=null;setState(null);}}}
     finally{if(!controller.signal.aborted)setLoading(false);}
   }
-  useEffect(()=>{void refresh();const poll=setInterval(()=>void refresh(),3000),tick=setInterval(()=>setClock(Date.now()),1000);const clear=()=>{setPin('');updateBypassDraft(null);if(reviewRef.current||reviewFlight.current)discardReview();},hidden=()=>{if(document.hidden)clear();};document.addEventListener('visibilitychange',hidden);window.addEventListener('pagehide',clear);return()=>{clearInterval(poll);clearInterval(tick);pending.current?.abort();document.removeEventListener('visibilitychange',hidden);window.removeEventListener('pagehide',clear);};},[]);
+  useEffect(()=>{void refresh();const poll=setInterval(()=>void refresh(),3000),tick=setInterval(()=>setClock(Date.now()),1000);const clear=()=>{setPin('');requestedBypass.current=null;updateBypassDraft(null);if(reviewRef.current||reviewFlight.current)discardReview();},hidden=()=>{if(document.hidden)clear();};document.addEventListener('visibilitychange',hidden);window.addEventListener('pagehide',clear);return()=>{clearInterval(poll);clearInterval(tick);pending.current?.abort();document.removeEventListener('visibilitychange',hidden);window.removeEventListener('pagehide',clear);};},[]);
   useEffect(()=>{if(!pin)return;const timer=setTimeout(()=>setPin(''),30000);return()=>clearTimeout(timer);},[pin]);
   const timezone=state?.timezone||'UTC';
   const formats=useMemo(()=>({time:new Intl.DateTimeFormat('en-GB',{timeZone:timezone,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}),date:new Intl.DateTimeFormat('en-GB',{timeZone:timezone,weekday:'long',day:'numeric',month:'long'})}),[timezone]);
@@ -164,6 +176,7 @@ export default function Keypad({onSecurity,kiosk=false,requestApi=request}){
   const selected=areas.filter(area=>selectedIds.includes(area.id)),zones=notReadyZones(selected),index=Math.min(carousel,Math.max(0,zones.length-1)),zone=zones[index];
   const available=!!state&&!state.readOnly&&!connectionError&&!busy;
   const bypassZoneIds=bypassDraft?.zoneIds||[];
+  const pendingBypassNames=new Map(selected.flatMap(area=>cycleZoneCandidates(area).filter(zone=>bypassZoneIds.includes(zone.id)).map(zone=>[zone.id,zone.name])));
   const canReview=available&&state.canArm&&typeof state.armingRevision==='string';
   const canSelectBypasses=!!state?.canBypassArm&&state.canArm&&!state.readOnly&&typeof state.armingRevision==='string'&&selected.length>0&&
     selected.every(area=>editable(area)&&area.enabled&&area.zoneCount>0&&!area.activeAlarmCount);
@@ -277,7 +290,8 @@ export default function Keypad({onSecurity,kiosk=false,requestApi=request}){
         </div>
         <button className="text-button keypad-all-zones" disabled={!zones.length} onClick={()=>setDialog('zones')}>Show all not ready zones</button>
         {bypassZoneIds.length?<section className="keypad-cycle-bypasses" aria-label="Zone bypasses for next arm">
-          <strong>Bypass for next arm</strong><span>{zones.filter(item=>bypassZoneIds.includes(item.id)).map(item=>item.name).join(', ')}</span>
+          <strong>Bypass for next arm</strong><span>{[...pendingBypassNames.values()].join(', ')}</span>
+          <button type="button" className="text-button" disabled={!available} onClick={()=>{discardReview();updateBypassDraft(null);}}>Clear pending bypasses</button>
         </section>:null}
         <div className="keypad-entry-grid">
           <PinPad pin={pin} onChange={setPin} disabled={busy||!!connectionError||state.readOnly} onPhysicalKey={()=>feedback('gesture',{pip:true})}/>

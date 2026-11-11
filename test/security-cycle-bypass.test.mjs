@@ -53,7 +53,7 @@ test('selective Arm Away bypasses only reviewed blockers for the selected area a
   }finally{f.close();}
 });
 
-test('selected zone previews require current included blockers and expire when conditions change',()=>{
+test('selected zone previews require current included zones and expire when conditions change',()=>{
   const f=fixture();try{
     f.report('inside-a',true);f.report('inside-b',true);
     const request={action:'prepare_arm_away',areaIds:[f.a.id],bypassZoneIds:[f.zones[1].id]};
@@ -61,13 +61,112 @@ test('selected zone previews require current included blockers and expire when c
     assert.throws(()=>f.keypad.command(f.admin,{...request,bypassZoneIds:[]}),/Choose valid bypass zones/);
     assert.throws(()=>f.keypad.command(f.admin,{...request,bypassZoneIds:[f.zones[1].id,f.zones[1].id]}),/without duplicates/);
     assert.throws(()=>f.keypad.command(f.admin,{action:request.action,all:true,bypassZoneIds:request.bypassZoneIds}),/explicit area selection/);
-    for(const zoneId of [f.zones[0].id,f.zones[2].id])assert.throws(()=>f.keypad.command(f.admin,{...request,bypassZoneIds:[...request.bypassZoneIds,zoneId]}),/no longer blocks any selected area/);
+    assert.throws(()=>f.keypad.command(f.admin,{...request,bypassZoneIds:[...request.bypassZoneIds,f.zones[2].id]}),/no longer included in any selected area/);
     assert.deepEqual(rows(f),before);
     const prepared=f.keypad.command(f.admin,request);
     f.report('inside-a',false);f.report('extra-a',true);
     assert.throws(()=>f.confirm(prepared),/Area not ready: Zone extra-a/);
     assert.throws(()=>f.confirm(prepared),/expired or changed/);
     assert.equal(f.security.area(f.a.id).mode,'disarmed');
+  }finally{f.close();}
+});
+
+test('signed-in keypad can review a closed zone before arming while kiosk still requires a blocker',()=>{
+  const f=fixture();try{
+    f.enable();
+    const shared=f.zones[0],request={action:'prepare_arm_away',areaIds:[f.a.id],bypassZoneIds:[shared.id]};
+    const state=f.keypad.state(f.operator).areas.find(area=>area.id===f.a.id);
+    assert.deepEqual(state.bypassCandidates,f.zones.filter(zone=>zone.areaIds.includes(f.a.id)).map(({id,name})=>({id,name,status:'normal',trouble:null})));
+    assert.equal(Object.hasOwn(f.kiosk.state().areas.find(area=>area.id===f.a.id),'bypassCandidates'),false);
+    assert.throws(()=>f.kiosk.command(request),/no longer blocks any selected area/);
+    const before=rows(f),review=f.keypad.command(f.operator,request);
+    assert.deepEqual(review.preview.areas[0].blockingZones,[{id:shared.id,name:shared.name,status:'normal',trouble:null}]);
+    assert.equal(review.preview.areas[0].protectedZoneCount,2);
+    assert.deepEqual(rows(f),before);
+    f.report('shared',true);
+    assert.throws(()=>f.confirm(review,[f.a.id],f.operator),/Conditions changed/);
+    f.report('shared',false);
+    const fresh=f.keypad.command(f.operator,request);
+    f.confirm(fresh,[f.a.id],f.operator);
+    assert.deepEqual(f.security.cycleBypassIds(f.security.area(f.a.id)),[shared.id]);
+    f.security.command(f.b.id,'arm_away',{},'Fixture');
+    f.report('shared',true);
+    assert.deepEqual(f.security.activeIncidents().map(incident=>incident.areaId),[f.b.id]);
+    f.security.command(f.a.id,'disarm',{},'Fixture');
+    assert.deepEqual(f.security.cycleBypassIds(f.security.area(f.a.id)),[]);
+    assert.deepEqual(rows(f).zones,before.zones);
+  }finally{f.close();}
+});
+
+test('adding a bypass to an armed cycle is atomic, scoped, and rejects stale or unprotected changes',()=>{
+  const f=fixture();try{
+    f.security.command(f.a.id,'arm_away',{},'Fixture');f.security.command(f.b.id,'arm_away',{},'Fixture');
+    const area=f.security.area(f.a.id),other=f.security.area(f.b.id);
+    const payload={areaId:area.id,zoneId:f.zones[0].id,cycleId:area.cycleId};
+    const before=rows(f),event=f.security.event.bind(f.security);
+    f.security.event=(type,...args)=>{
+      const result=event(type,...args);
+      if(type==='cycle_bypass_added')throw Error('Synthetic cycle bypass audit failure');
+      return result;
+    };
+    assert.throws(()=>f.security.bypassZoneForCycle(payload,f.operator.username),/Synthetic cycle bypass audit failure/);
+    assert.deepEqual(rows(f),before);
+    f.security.event=event;
+    const result=f.security.bypassZoneForCycle(payload,f.operator.username);
+    assert.equal(result.cycleId,area.cycleId);assert.equal(result.mode,'away');assert.equal(result.includedCount,2);
+    assert.deepEqual(result.cycleBypasses,[{id:f.zones[0].id,name:f.zones[0].name}]);
+    assert.deepEqual(f.security.area(f.b.id),other);assert.deepEqual(rows(f).zones,before.zones);
+    const added=f.security.state().events.find(event=>event.type==='cycle_bypass_added');
+    assert.deepEqual([added.areaId,added.zoneId,added.actor],[area.id,f.zones[0].id,f.operator.username]);
+    f.security.bypassZoneForCycle({...payload,zoneId:f.zones[1].id},f.operator.username);
+    const after=rows(f);
+    assert.throws(()=>f.security.bypassZoneForCycle({...payload,zoneId:f.zones[3].id}),/must remain protected/);
+    assert.throws(()=>f.security.bypassZoneForCycle({...payload,zoneId:f.zones[2].id}),/no longer included/);
+    assert.throws(()=>f.security.bypassZoneForCycle(payload),/no longer included/);
+    assert.deepEqual(rows(f),after);
+    f.report('shared',true);
+    assert.deepEqual(f.security.activeIncidents().map(incident=>incident.areaId),[other.id]);
+    assert.throws(()=>f.security.bypassZoneForCycle({areaId:other.id,zoneId:f.zones[2].id,cycleId:other.cycleId}),/alarm memory/);
+    f.security.command(area.id,'disarm',{},'Fixture');f.report('shared',false);
+    f.security.command(area.id,'arm_away',{},'Fixture');
+    assert.notEqual(f.security.area(area.id).cycleId,area.cycleId);
+    assert.deepEqual(f.security.cycleBypassIds(f.security.area(area.id)),[]);
+    assert.throws(()=>f.security.bypassZoneForCycle(payload),/cycle changed/);
+  }finally{f.close();}
+});
+
+test('armed-cycle bypass excludes Home skips and rejects both exit and entry transitions',()=>{
+  const f=fixture();try{
+    f.security.saveZone({id:f.zones[0].id,homeBypass:true,type:'entry'},'Fixture');
+    f.security.command(f.a.id,'arm_home',{},'Fixture');
+    let area=f.security.area(f.a.id);
+    assert.throws(()=>f.security.bypassZoneForCycle({areaId:area.id,zoneId:f.zones[0].id,cycleId:area.cycleId}),/no longer included/);
+    const result=f.security.bypassZoneForCycle({areaId:area.id,zoneId:f.zones[1].id,cycleId:area.cycleId});
+    assert.equal(result.mode,'home');assert.equal(result.includedCount,1);
+    f.security.command(area.id,'disarm',{},'Fixture');
+    f.security.saveArea({id:area.id,exitDelaySec:5,entryDelaySec:20},'Fixture');
+    f.security.command(area.id,'arm_away',{},'Fixture');area=f.security.area(area.id);
+    const request={areaId:area.id,zoneId:f.zones[1].id,cycleId:area.cycleId};
+    assert.throws(()=>f.security.bypassZoneForCycle(request),/fully armed/);
+    f.advance(5000);f.security.tick();f.report('shared',true);
+    assert.ok(f.security.area(area.id).entryAt);
+    assert.throws(()=>f.security.bypassZoneForCycle(request),/fully armed/);
+  }finally{f.close();}
+});
+
+test('bypassing a Force-awaiting shared zone removes its pending marker only in the chosen armed area',()=>{
+  const f=fixture();try{
+    f.security.readings.delete('shared');
+    const ids=[f.a.id,f.b.id],prepared=prepareForce(f,ids);
+    confirmForce(f,prepared,ids);
+    const a=f.security.area(f.a.id),b=f.security.area(f.b.id);
+    assert.deepEqual(f.security.cycleAwaitingIds(a),[f.zones[0].id]);
+    assert.deepEqual(f.security.cycleAwaitingIds(b),[f.zones[0].id]);
+    const result=f.security.bypassZoneForCycle({areaId:a.id,zoneId:f.zones[0].id,cycleId:a.cycleId});
+    assert.deepEqual(result.awaitingZones,[]);
+    assert.deepEqual(f.security.cycleAwaitingIds(f.security.area(b.id)),[f.zones[0].id]);
+    f.report('shared',true);
+    assert.deepEqual(f.security.activeIncidents().map(incident=>incident.areaId),[b.id]);
   }finally{f.close();}
 });
 
@@ -396,5 +495,15 @@ test('existing HTTP command endpoints enforce preview authority while direct Sec
     const selectedPreview={action:'prepare_arm_away',areaIds:[f.a.id],bypassZoneIds:[f.zones[0].id]};
     assert.equal((await request('keypad/command',selectedPreview)).status,401);const login=await request('login',{username:'admin',password});assert.equal((await request('keypad/command',selectedPreview,login.cookie)).status,200);assert.equal((await request('security/command',{areaId:f.a.id,action:'disarm',actor:'forged-actor'},login.cookie)).status,200);assert.equal(f.security.state().events.find(event=>event.type==='area_disarmed').actor,'admin');for(const bypass of [{bypass:{token:'a'.repeat(64),reason}},{bypassZoneIds:[f.zones[0].id]},{cycleBypass:{zoneIds:[f.zones[0].id]}}])assert.equal((await request('security/command',{areaId:f.a.id,action:'arm_away',actor:'forged-actor',...bypass},login.cookie)).status,400);assert.equal((await request('security/command',{areaId:f.a.id,action:'prepare_arm_away'},login.cookie)).status,400);
     const preview=await request('kiosk/command',selectedPreview);assert.equal(preview.status,200);assert.equal((await request('kiosk/command',{action:'arm_away',areaIds:[f.a.id],bypass:{token:preview.body.preview.token,reason}})).status,200);assert.equal(f.security.area(f.a.id).mode,'away');assert.equal(f.security.areaView(f.security.area(f.a.id)).cycleBypassCount,1);
+    const cycle=f.security.area(f.a.id).cycleId,apply={areaId:f.a.id,zoneId:f.zones[1].id,cycleId:cycle};
+    const reader=f.accounts.create({username:'bypass-reader',password,permissions:['viewSecurity']},'Fixture');
+    const readerLogin=await request('login',{username:reader.username,password});
+    assert.equal((await request('security/cycle-bypass',apply)).status,401);
+    assert.equal((await request('security/cycle-bypass',apply,readerLogin.cookie)).status,403);
+    assert.equal((await request('security/cycle-bypass',{...apply,actor:'forged-actor'},login.cookie)).status,400);
+    assert.equal((await request('security/cycle-bypass',{...apply,cycleId:'old-cycle'},login.cookie)).status,409);
+    const bypass=await request('security/cycle-bypass',apply,login.cookie);
+    assert.equal(bypass.status,200);assert.equal(bypass.body.area.cycleId,cycle);assert.equal(bypass.body.area.cycleBypassCount,2);
+    assert.equal(f.security.state().events.find(event=>event.type==='cycle_bypass_added').actor,'admin');
   }finally{server?.closeAllConnections();if(server)await new Promise(resolve=>server.close(resolve));f.close();}
 });

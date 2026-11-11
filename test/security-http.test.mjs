@@ -76,13 +76,19 @@ test('Security-only readers can inspect sanitized device candidates without heal
 test('view, control and configuration permissions are independently enforced and audit actors cannot be forged',async()=>{
   const f=await fixture();try{
     const reader=await f.create('security-reader',['viewSecurity']),controller=await f.create('security-controller',['controlSecurity']),manager=await f.create('security-manager',['manageSecurity']);
-    const controls=[['security/command',{areaId:'area-one',action:'arm_away',reason:'Leaving'}],['security/bypass',{id:'zone-one',durationMin:60,reason:'Maintenance'}],['security/clear-bypass',{id:'zone-one'}]];
+    const controls=[['security/command',{areaId:'area-one',action:'arm_away',reason:'Leaving'}],['security/clear-bypass',{id:'zone-one'}]];
     const configs=[['security/areas',{name:'Ground floor'}],['security/zones',{name:'Door'}],['security/schedules',{name:'Night arm'}],['security/actions',{name:'Alert'}],['security/remove-area',{id:'area-one'}],['security/remove-zone',{id:'zone-one'}],['security/remove-schedule',{id:'schedule-one'}],['security/remove-action',{id:'action-one'}]];
     for(const [route,body] of [...controls,...configs])assert.equal((await f.request(route,body,reader.cookie)).status,403,route);
     for(const [route,body] of configs)assert.equal((await f.request(route,body,controller.cookie)).status,403,route);
     for(const [route,body] of controls)assert.equal((await f.request(route,body,manager.cookie)).status,403,route);
     for(const [route,body] of controls)assert.equal((await f.request(route,{...body,actor:'admin'},controller.cookie)).status,200,route);
     for(const [route,body] of configs)assert.ok([200,201].includes((await f.request(route,{...body,actor:'admin'},manager.cookie)).status),route);
+    for(const route of ['security/bypass','security/zones/bypass']){
+      const body={id:'zone-one',durationMin:60,reason:'Maintenance'};
+      assert.equal((await f.request(route,body,reader.cookie)).status,403);
+      assert.equal((await f.request(route,body,controller.cookie)).status,410);
+    }
+    assert.equal(f.calls.some(call=>call.method==='bypassZone'),false);
     assert.deepEqual(f.calls.find(call=>call.method==='command').args,['area-one','arm_away',{reason:'Leaving'},'security-controller']);
     for(const call of f.calls.filter(call=>call.method!=='command'&&call.method!=='bypassZone'&&call.method!=='clearBypass'))assert.equal(call.args.at(-1),'security-manager',call.method);
     const bulkActors=[],bulkRoute='security/acknowledge-all';

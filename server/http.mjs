@@ -7,7 +7,7 @@ import {PushService} from './push.mjs';
 import {validateTopics} from './topic-log.mjs';
 import {Sessions} from './sessions.mjs';
 import {Accounts,permissionKeys,hasPermission} from './accounts.mjs';
-import {SecurityEngine,SecuritySettingsConflict} from './security.mjs';
+import {SecurityCycleConflict,SecurityEngine,SecuritySettingsConflict} from './security.mjs';
 import {Keypad,KeypadError} from './keypad.mjs';
 import {Kiosk} from './kiosk.mjs';
 import {FloorPlan,FloorPlanError,floorPlanBodyLimit,floorPlanPermissions} from './floor-plan.mjs';
@@ -16,7 +16,7 @@ const previewUser={id:'local-preview',username:'admin',displayName:'Local previe
 const adminChanges=new Set(['/api/users','/api/users/update','/api/users/reset-password','/api/users/revoke-sessions','/api/users/keypad','/api/kiosk/settings']);
 const routeFeatures=new Map([['/api/thresholds','manageThresholds'],['/api/device','manageDevices'],['/api/networks','manageBrokers'],['/api/email','manageEmail'],['/api/push/settings','manageNotifications'],...['retire','restore','delete-history','link','unlink'].map(action=>['/api/devices/'+action,'manageDevices']),...['acknowledge','process','process-all'].map(action=>['/api/alarms/'+action,'acknowledge']),['/api/shunts','manageShunts'],['/api/shunts/cancel','manageShunts']]);
 for(const route of ['areas','zones','schedules','actions','settings','remove-area','remove-zone','remove-schedule','remove-action','areas/delete','zones/delete','schedules/delete','actions/delete'])routeFeatures.set('/api/security/'+route,'manageSecurity');
-for(const route of ['command','acknowledge-all','bypass','clear-bypass','zones/bypass','zones/clear-bypass'])routeFeatures.set('/api/security/'+route,'controlSecurity');
+for(const route of ['command','acknowledge-all','cycle-bypass','bypass','clear-bypass','zones/bypass','zones/clear-bypass'])routeFeatures.set('/api/security/'+route,'controlSecurity');
 routeFeatures.set('/api/security/push-test','viewSecurity');
 routeFeatures.set('/api/keypad/command','viewSecurity');
 const personalChanges=new Set(['/api/logout','/api/account/password','/api/account/keypad','/api/push/subscribe','/api/push/remove','/api/push/test']);
@@ -143,7 +143,8 @@ export function createApp(engine,{collectors=null,push=null,security=null,securi
       }
       if(route==='/api/security/settings'&&req.method==='POST')return json(res,200,security.saveSettings(body,actor));
       if(route==='/api/security/push-test'&&req.method==='POST')return json(res,200,await push.securityTest(body.subscriptionId,accounts.active()?user.id:null));
-      if(['/api/security/bypass','/api/security/zones/bypass'].includes(route)&&req.method==='POST')return json(res,200,{ok:true,zone:security.bypassZone(body.id,{durationMin:body.durationMin,reason:body.reason},actor)});
+      if(route==='/api/security/cycle-bypass'&&req.method==='POST')return json(res,200,{ok:true,area:security.bypassZoneForCycle(body,actor)});
+      if(['/api/security/bypass','/api/security/zones/bypass'].includes(route)&&req.method==='POST')return json(res,410,{error:'Choose a zone bypass for one area and arming cycle.'});
       if(['/api/security/clear-bypass','/api/security/zones/clear-bypass'].includes(route)&&req.method==='POST')return json(res,200,{ok:true,zone:security.clearBypass(body.id,actor)});
       const securitySaves={'/api/security/areas':['saveArea','area'],'/api/security/zones':['saveZone','zone'],'/api/security/schedules':['saveSchedule','schedule'],'/api/security/actions':['saveAction','action']};
       if(securitySaves[route]&&req.method==='POST'){const [method,key]=securitySaves[route];return json(res,body.id?200:201,{ok:true,[key]:security[method](body,actor)});}
@@ -222,6 +223,6 @@ export function createApp(engine,{collectors=null,push=null,security=null,securi
       const relative=decodeURIComponent(route).replace(/^\/+/,'');const candidate=path.resolve(dist,relative||'index.html');if(candidate!==dist&&!candidate.startsWith(dist+path.sep))return json(res,403,{error:'Invalid path'});
       const file=fs.existsSync(candidate)&&fs.statSync(candidate).isFile()?candidate:path.join(dist,'index.html');if(!fs.existsSync(file))return json(res,503,{error:'Build the frontend first'});
       const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.woff2':'font/woff2','.png':'image/png','.webmanifest':'application/manifest+json'}[path.extname(file)]||'application/octet-stream';if(path.basename(file)==='sw.js')res.setHeader('Service-Worker-Allowed','/');res.writeHead(200,{'Content-Type':mime,'Cache-Control':path.extname(file)==='.html'||path.basename(file)==='sw.js'?'no-cache':'public,max-age=3600'});fs.createReadStream(file).pipe(res);
-    }catch(e){if(!res.headersSent){if(e instanceof KeypadError&&e.retryAfter)res.setHeader('Retry-After',String(e.retryAfter));const status=e instanceof KeypadError||e instanceof FloorPlanError?e.statusCode:e instanceof SecuritySettingsConflict?409:400;json(res,status,{error:e.message||'Request failed'});}else res.end();}
+    }catch(e){if(!res.headersSent){if(e instanceof KeypadError&&e.retryAfter)res.setHeader('Retry-After',String(e.retryAfter));const status=e instanceof KeypadError||e instanceof FloorPlanError?e.statusCode:e instanceof SecuritySettingsConflict||e instanceof SecurityCycleConflict?409:400;json(res,status,{error:e.message||'Request failed'});}else res.end();}
   });
 }

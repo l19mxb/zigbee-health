@@ -2,7 +2,7 @@ import React,{useEffect,useRef,useState} from 'react';
 import {request} from './api.jsx';
 import {Badge,Field,Icon,Pagination,date} from './ui.jsx';
 import {SortHead,useTable} from './tables.jsx';
-import {SecurityBypassDialog,SecurityCommandDialog,SecurityForm,SecurityRemoveDialog} from './security-forms.jsx';
+import {SecurityClearBypassDialog,SecurityCommandDialog,SecurityCycleBypassDialog,SecurityForm,SecurityRemoveDialog} from './security-forms.jsx';
 import './security.css';
 
 const tabs=[['overview','Overview'],['zones','Zones'],['settings','Settings'],['schedules','Schedules'],['actions','Alert actions']];
@@ -20,6 +20,21 @@ function zoneForArea(zone,areaId){
 const zonesForArea=(zones,areaId)=>zones.filter(zone=>membershipIds(zone).includes(areaId)).map(zone=>zoneForArea(zone,areaId));
 const zoneEditable=(zone,areas)=>membershipIds(zone).length>0&&membershipIds(zone).every(id=>canConfigure(areas.get(id)));
 const areaRemovable=(area,zones,areas,incidents)=>canConfigure(area)&&!area.activeAlarmCount&&zones.filter(zone=>membershipIds(zone).includes(area.id)).every(zone=>zoneEditable(zone,areas)&&!incidents.some(incident=>incident.zoneId===zone.id&&incident.resetAt==null));
+function bypassChoices(zone,areas,canOpenKeypad){
+  if(!zone?.enabled||manualBypass(zone))return [];
+  return membershipIds(zone).flatMap(id=>{
+    const area=areas.get(id),membership=zone.areaStates?.find(view=>view.areaId===id);
+    if(!area?.enabled||area.targetMode||area.activeAlarmCount!==0||!(area.includedCount>1)
+      ||!membership||membership.bypassed||membership.homeExcluded)return [];
+    if(canOpenKeypad&&area.mode==='disarmed'&&area.status==='disarmed'){
+      return [{id,name:area.name,mode:'disarmed',cycleId:null}];
+    }
+    if(area.status==='armed'&&['home','away'].includes(area.mode)&&area.cycleId){
+      return [{id,name:area.name,mode:area.mode,cycleId:area.cycleId}];
+    }
+    return [];
+  });
+}
 const plural=(number,noun)=>number+' '+noun+(number===1?'':noun==='bypass'?'es':'s');
 const validReadingTimeout=minutes=>Number.isInteger(minutes)&&minutes>=1&&minutes<=43200;
 function timeoutDuration(minutes){
@@ -34,7 +49,7 @@ function PanelHeading({title,count,children}){return <header className="security
 function SearchBox({label,table}){return <label className="search compact"><Icon name="search"/><input aria-label={label} placeholder={label+'…'} value={table.search} onChange={event=>table.setSearch(event.target.value)}/></label>;}
 function EmptyPanel({title,children,action}){return <div className="security-empty"><Icon name="shield" size={34}/><h3>{title}</h3><p>{children}</p>{action}</div>;}
 
-export default function Security({permissions={},demo=false,onAccount,openIncidentId,openRequestKey=0}){
+export default function Security({permissions={},demo=false,onAccount,onKeypadBypass,openIncidentId,openRequestKey=0}){
   const [state,setState]=useState(null),[error,setError]=useState(''),[loading,setLoading]=useState(true),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[tab,setTab]=useState('overview'),[areaId,setAreaId]=useState(''),[dialog,setDialog]=useState(null),[clock,setClock]=useState(Date.now());
   const [acknowledgeError,setAcknowledgeError]=useState('');
   const active=useRef(null),received=useRef(Date.now()),openedIncident=useRef(null),openRefresh=useRef(null);
@@ -61,7 +76,7 @@ export default function Security({permissions={},demo=false,onAccount,openIncide
     if(error)throw Error('Reconnect to security before applying this change.');
     setBusy(true);setMessage('');
     try{const result=await request(route,body);await refresh();setDialog(null);setMessage(successMessage?successMessage(result):route==='security/settings'?'Zone reading timeout saved.':route.includes('command')?'Area command applied.':route.includes('bypass')?'Zone bypass updated.':'Security configuration saved.');return result;}
-    catch(cause){if(route==='security/settings'&&cause.status===409)await refresh();throw cause;}
+    catch(cause){if(['security/settings','security/cycle-bypass'].includes(route)&&cause.status===409)await refresh();throw cause;}
     finally{setBusy(false);}
   }
   async function acknowledgeAll(){
@@ -81,6 +96,33 @@ export default function Security({permissions={},demo=false,onAccount,openIncide
   const openCommand=(action,area=selected)=>{if(area)setDialog({type:'command',area,action});};
   const currentAreas=new Map(areas.map(area=>[area.id,area]));
   const safeState={...state,areas,zones,schedules:state.schedules||[],actions:state.actions||[],incidents:state.incidents||[],events:state.events||[],deliveries:state.deliveries||[],networks:state.networks||[]};
+  const canOpenKeypad=typeof onKeypadBypass==='function';
+  const bypassZone=dialog?.type==='cycle-bypass'?zones.find(zone=>zone.id===dialog.item.id):null;
+  const currentBypassChoices=control&&!error&&bypassZone?bypassChoices(bypassZone,currentAreas,canOpenKeypad):[];
+  const availableBypassIds=dialog?.type==='cycle-bypass'
+    ?dialog.choices.filter(choice=>currentBypassChoices.some(current=>current.id===choice.id&&current.mode===choice.mode
+      &&current.cycleId===choice.cycleId)).map(choice=>choice.id)
+    :[];
+  function openBypass(zone,choices){
+    if(manualBypass(zone)){setDialog({type:'clear-bypass',item:zone});return;}
+    if(choices.length===1&&choices[0].mode==='disarmed'){
+      onKeypadBypass({areaId:choices[0].id,zoneId:zone.id});
+    }else if(choices.length){
+      setDialog({type:'cycle-bypass',item:zone,choices});
+    }
+  }
+  async function confirmCycleBypass(choice){
+    if(!bypassZone||busy||!availableBypassIds.includes(choice.id)){
+      throw Error('The area or zone changed. Review its current status before bypassing.');
+    }
+    if(choice.mode==='disarmed'){
+      setDialog(null);
+      onKeypadBypass({areaId:choice.id,zoneId:bypassZone.id});
+      return;
+    }
+    await save('security/cycle-bypass',{areaId:choice.id,zoneId:bypassZone.id,cycleId:choice.cycleId},
+      ()=>bypassZone.name+' is bypassed in '+choice.name+' until disarm.');
+  }
   return <div className="security-workspace">
     <nav className="security-tabs" aria-label="Security pages">{tabs.map(([id,label])=><button key={id} aria-current={tab===id?'page':undefined} className={tab===id?'active':''} onClick={()=>setTab(id)}>{label}</button>)}</nav>
     {error?<div className="notice critical" role="alert"><strong>Security connection lost.</strong> Showing the last received state. Controls are unavailable until reconnection.<button onClick={refresh}>Reconnect</button></div>:null}
@@ -95,9 +137,15 @@ export default function Security({permissions={},demo=false,onAccount,openIncide
       <SecurityAlarmStack state={safeState} areas={currentAreas} control={control&&!busy&&!error} onCommand={openCommand}
         onAcknowledgeAll={control?acknowledgeAll:undefined} acknowledgeError={acknowledgeError}/>
       <RecentActivity state={safeState} areas={currentAreas}/>
-    </>:tab==='zones'?<Zones state={safeState} manage={manage&&!busy&&!error} control={control&&!busy&&!error} onAdd={()=>openForm('zone')} onEdit={item=>openForm('zone',item)} onRemove={item=>setDialog({type:'remove',kind:'zone',item})} onBypass={(item,clear)=>setDialog({type:'bypass',item,clear})}/>:tab==='schedules'?<Schedules state={safeState} manage={manage&&!busy&&!error} onAdd={()=>openForm('schedule')} onEdit={item=>openForm('schedule',item)} onRemove={item=>setDialog({type:'remove',kind:'schedule',item})}/>:tab==='actions'?<AlertActions state={safeState} manage={manage&&!busy&&!error} onAdd={()=>openForm('action')} onEdit={item=>openForm('action',item)} onRemove={item=>setDialog({type:'remove',kind:'action',item})}/>:<SecuritySettings timeout={state.readingTimeoutMin} canChange={state.canChangeReadingTimeout===true} manage={manage} busy={busy} disconnected={!!error} onSave={save}/>}
+    </>:tab==='zones'?<Zones state={safeState} manage={manage&&!busy&&!error} control={control&&!busy&&!error}
+      canOpenKeypad={canOpenKeypad} onAdd={()=>openForm('zone')} onEdit={item=>openForm('zone',item)}
+      onRemove={item=>setDialog({type:'remove',kind:'zone',item})} onBypass={openBypass}
+    />:tab==='schedules'?<Schedules state={safeState} manage={manage&&!busy&&!error} onAdd={()=>openForm('schedule')} onEdit={item=>openForm('schedule',item)} onRemove={item=>setDialog({type:'remove',kind:'schedule',item})}/>:tab==='actions'?<AlertActions state={safeState} manage={manage&&!busy&&!error} onAdd={()=>openForm('action')} onEdit={item=>openForm('action',item)} onRemove={item=>setDialog({type:'remove',kind:'action',item})}/>:<SecuritySettings timeout={state.readingTimeoutMin} canChange={state.canChangeReadingTimeout===true} manage={manage} busy={busy} disconnected={!!error} onSave={save}/>}
     {demo?<p className="security-demo-note"><Icon name="flask" size={15}/>Simulation only. Security actions do not publish MQTT messages or send email.</p>:null}
-    {dialog?.type==='form'?<SecurityForm key={dialog.kind+(dialog.item?.id||'new')} kind={dialog.kind} item={dialog.item} state={safeState} areaId={selected&&canConfigure(selected)?selected.id:areas.find(canConfigure)?.id} onClose={()=>setDialog(null)} onSave={save} onAccount={onAccount}/>:dialog?.type==='command'?<SecurityCommandDialog area={areas.find(area=>area.id===dialog.area.id)||dialog.area} action={dialog.action} zones={zonesForArea(zones,dialog.area.id)} onClose={()=>setDialog(null)} onSave={save}/>:dialog?.type==='bypass'?<SecurityBypassDialog zone={dialog.item} clear={dialog.clear} onClose={()=>setDialog(null)} onSave={save}/>:dialog?.type==='remove'?<SecurityRemoveDialog kind={dialog.kind} item={dialog.item} onClose={()=>setDialog(null)} onSave={save}/>:null}
+    {dialog?.type==='form'?<SecurityForm key={dialog.kind+(dialog.item?.id||'new')} kind={dialog.kind} item={dialog.item} state={safeState} areaId={selected&&canConfigure(selected)?selected.id:areas.find(canConfigure)?.id} onClose={()=>setDialog(null)} onSave={save} onAccount={onAccount}/>:dialog?.type==='command'?<SecurityCommandDialog area={areas.find(area=>area.id===dialog.area.id)||dialog.area} action={dialog.action} zones={zonesForArea(zones,dialog.area.id)} onClose={()=>setDialog(null)} onSave={save}/>:dialog?.type==='clear-bypass'?<SecurityClearBypassDialog zone={dialog.item} onClose={()=>setDialog(null)} onSave={save}/>:dialog?.type==='cycle-bypass'?
+      <SecurityCycleBypassDialog zone={dialog.item} choices={dialog.choices} availableIds={availableBypassIds}
+        onClose={()=>setDialog(null)} onConfirm={confirmCycleBypass}/>
+      :dialog?.type==='remove'?<SecurityRemoveDialog kind={dialog.kind} item={dialog.item} onClose={()=>setDialog(null)} onSave={save}/>:null}
   </div>;
 }
 
@@ -196,15 +244,19 @@ function MembershipStatus({zone}){
   return <div className="security-shared-statuses">{ids.map((id,index)=>{const view=zoneForArea(zone,id);return <span key={id}><span>{zone.areaNames[index]}</span><Badge tone={zoneTone(view)}>{zoneLabel(view)}</Badge></span>;})}</div>;
 }
 
-function Zones({state,manage,control,onAdd,onEdit,onRemove,onBypass}){
+function Zones({state,manage,control,canOpenKeypad,onAdd,onEdit,onRemove,onBypass}){
   const areas=new Map(state.areas.map(area=>[area.id,area]));
   const table=useTable(state.zones.map(zone=>{const areaNames=membershipIds(zone).map(id=>areas.get(id)?.name||'Removed area');return {...zone,areaNames,areaName:areaNames.join(', '),networkLabel:[zone.deviceName,zone.networkLabel,...areaNames,zone.property].join(' ')};}));
   return <section className="security-section" aria-label="Security zones">
     <PanelHeading title="Zones" count={state.zones.length}><div className="security-table-tools"><SearchBox label="Search zones" table={table}/>{manage?<button className="primary" onClick={onAdd} disabled={!state.areas.some(canConfigure)}>+ Add zone</button>:null}</div></PanelHeading>
-    {state.zones.some(zone=>membershipIds(zone).length>1)?<p className="security-section-intro">A shared zone protects every listed area. Activation settings and manual bypass are shared; arming, delays and alarms remain independent in each area.</p>:null}
+    {state.zones.some(zone=>membershipIds(zone).length>1)?<p className="security-section-intro">A shared zone protects every listed area. Each area has its own arming cycle, bypasses, delays and alarms.</p>:null}
     {!state.areas.length?<p className="security-table-empty">Create an area first, then assign its Zigbee devices as zones.</p>:table.filtered.length?<>
       <div className="table-scroll security-table"><table><thead><tr><SortHead column="name" table={table}>Zone</SortHead><SortHead column="areaName" table={table}>Areas</SortHead><SortHead column="deviceName" table={table}>Device</SortHead><SortHead column="type" table={table}>Type</SortHead><SortHead column="status" table={table}>Status by area</SortHead><th>Actions</th></tr></thead><tbody>{table.rows.map(zone=>{
         const editable=zoneEditable(zone,areas),shared=membershipIds(zone).length>1,alarmMemory=state.incidents.some(incident=>incident.zoneId===zone.id&&incident.resetAt==null),manual=manualBypass(zone),cycleNames=membershipIds(zone).filter(id=>zoneForArea(zone,id).cycleBypassed).map(id=>areas.get(id)?.name||'Removed area');
+        const choices=control?bypassChoices(zone,areas,canOpenKeypad):[];
+        const bypassLabel=manual?'Clear manual bypass':choices.length===1
+          ?choices[0].mode==='disarmed'?'Bypass for Arm Away':'Bypass until disarm…'
+          :'Bypass zone…';
         return <tr key={zone.id}>
           <td><strong>{zone.name}</strong>{zone.homeBypass?<span className="row-subtitle">Bypassed in Home mode</span>:null}</td>
           <td className="security-zone-memberships">{zone.areaName}{shared?<span className="row-subtitle">Shared zone · {membershipIds(zone).length} areas</span>:null}</td>
@@ -214,7 +266,9 @@ function Zones({state,manage,control,onAdd,onEdit,onRemove,onBypass}){
           <td><div className="record-actions">{manage?<>
             <button aria-label={'Edit zone '+zone.name} title={editable?'Edit shared zone settings':'Disarm every linked area before editing this zone'} disabled={!editable} onClick={()=>onEdit(zone)}>Edit</button>
             <button aria-label={'Remove zone '+zone.name} title={alarmMemory?'Reset this zone’s alarm memory before removing it':editable?'Remove this zone from every linked area':'Disarm every linked area before removing this zone'} disabled={!editable||alarmMemory} onClick={()=>onRemove(zone)}>Remove</button>
-          </>:null}{control?<button aria-label={(manual?'Clear manual bypass for ':'Apply manual bypass to ')+zone.name} title={shared?'Manual bypass affects every linked area':undefined} onClick={()=>onBypass(zone,manual)}>{manual?'Clear manual bypass':'Manual bypass…'}</button>:null}{!manage&&!control?<span className="muted">Read only</span>:null}</div></td>
+          </>:null}{control?<button type="button" aria-label={bypassLabel+' · '+zone.name} disabled={!manual&&!choices.length}
+            title={manual&&shared?'Clear the existing bypass in every linked area':!manual&&!choices.length?'No linked area can bypass this zone right now':undefined}
+            onClick={()=>onBypass(zone,choices)}>{bypassLabel}</button>:null}{!manage&&!control?<span className="muted">Read only</span>:null}</div></td>
         </tr>;
       })}</tbody></table></div><Pagination total={table.filtered.length} {...table}/>
     </>:<p className="security-table-empty">{table.search?'No zones match this search.':'No zones yet. Select a Zigbee device, its activation and one or more areas it protects.'}</p>}

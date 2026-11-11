@@ -35,7 +35,7 @@ function PushRecipients({draft,change,state,onAccount}){
 }
 
 function AreaMemberships({draft,change,state,locked}){
-  return <fieldset className="security-membership-fieldset" aria-describedby="security-membership-help"><legend>Areas</legend><p id="security-membership-help">Select one or more areas this zone protects.</p><div className="security-membership-options">{state.areas.map(area=><label className="checkbox-field" key={area.id}><input type="checkbox" aria-label={'Include area '+area.name} checked={draft.areaIds.includes(area.id)} disabled={locked||!editableArea(area)} onChange={event=>change('areaIds',event.target.checked?[...draft.areaIds,area.id]:draft.areaIds.filter(id=>id!==area.id))}/><span>{area.name}<small>{editableArea(area)?'Disarmed':area.mode==='disarmed'?'Arming':'Armed · disarm to change'}</small></span></label>)}</div><p className="small muted">{locked?'Reset this zone’s alarm memory before changing its area membership.':'Every linked area must be disarmed before this zone can be changed.'}</p>{draft.areaIds.length>1?<p className="security-shared-warning">Shared zone: activation, zone type, Home-mode bypass and manual bypass apply to every linked area. Each area arms and raises alarms independently.</p>:null}</fieldset>;
+  return <fieldset className="security-membership-fieldset" aria-describedby="security-membership-help"><legend>Areas</legend><p id="security-membership-help">Select one or more areas this zone protects.</p><div className="security-membership-options">{state.areas.map(area=><label className="checkbox-field" key={area.id}><input type="checkbox" aria-label={'Include area '+area.name} checked={draft.areaIds.includes(area.id)} disabled={locked||!editableArea(area)} onChange={event=>change('areaIds',event.target.checked?[...draft.areaIds,area.id]:draft.areaIds.filter(id=>id!==area.id))}/><span>{area.name}<small>{editableArea(area)?'Disarmed':area.mode==='disarmed'?'Arming':'Armed · disarm to change'}</small></span></label>)}</div><p className="small muted">{locked?'Reset this zone’s alarm memory before changing its area membership.':'Every linked area must be disarmed before this zone can be changed.'}</p>{draft.areaIds.length>1?<p className="security-shared-warning">Shared zone activation, zone type and Home-mode settings apply in every linked area. Each area has its own arming cycles and alarms.</p>:null}</fieldset>;
 }
 
 function DevicePicker({devices,selectedId,fallback,onChange}){
@@ -161,16 +161,55 @@ export function SecurityCommandDialog({area,action,zones,onClose,onSave}){
   </form></Modal>;
 }
 
-export function SecurityBypassDialog({zone,clear=false,onClose,onSave}){
-  const [duration,setDuration]=useState('60'),[reason,setReason]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
+export function SecurityClearBypassDialog({zone,onClose,onSave}){
+  const [error,setError]=useState(''),[busy,setBusy]=useState(false);
   const linkedAreas=zone.areaNames||zone.areaStates?.map(area=>area.areaName).filter(Boolean)||[];
-  return <Modal title={(clear?'Clear bypass':'Bypass zone')+' · '+zone.name} onClose={()=>{if(!busy)onClose();}}><form className="security-form" onSubmit={async event=>{event.preventDefault();setBusy(true);setError('');try{await onSave('security/'+(clear?'clear-bypass':'bypass'),{id:zone.id,...(!clear?{reason,durationMin:duration==='indefinite'?null:Number(duration)}:{})});}catch(error){setError(error.message);}finally{setBusy(false);}}}>
-    <p>{clear?'Return this zone to normal security monitoring. A fresh reading may be needed before it is ready.':'Activations from this zone will not raise new security alarms while it is bypassed.'}</p>
-    {linkedAreas.length?<div className={'notice '+(linkedAreas.length>1?'warning':'')}><strong>{clear?'Clears the bypass in':'Bypasses this zone in'} {linkedAreas.join(', ')}.</strong>{linkedAreas.length>1?' This is one shared zone; the change affects every linked area.':''}</div>:null}
-    {!clear?<Field label="Bypass for"><select value={duration} onChange={e=>setDuration(e.target.value)}><option value="15">15 minutes</option><option value="60">1 hour</option><option value="240">4 hours</option><option value="1440">24 hours</option><option value="indefinite">Until manually cleared</option></select></Field>:null}
-    {!clear?<Field label="Reason" required maxLength={300} value={reason} onChange={e=>setReason(e.target.value)}/>:null}
+  async function submit(event){
+    event.preventDefault();
+    if(busy)return;
+    setBusy(true);setError('');
+    try{await onSave('security/clear-bypass',{id:zone.id});}
+    catch(cause){setError(cause.message);}
+    finally{setBusy(false);}
+  }
+  return <Modal title={'Clear bypass · '+zone.name} onClose={()=>{if(!busy)onClose();}}><form className="security-form" onSubmit={submit}>
+    <p>Return this zone to normal security monitoring. It may need a fresh reading before it is ready.</p>
+    {linkedAreas.length?<div className={'notice '+(linkedAreas.length>1?'warning':'')}><strong>Clears the existing bypass in {linkedAreas.join(', ')}.</strong></div>:null}
     {error?<div className="notice critical" role="alert">{error}</div>:null}
-    <div className="form-actions"><button type="button" disabled={busy} onClick={onClose}>Cancel</button><button className="primary" disabled={busy}>{busy?'Applying…':clear?'Clear bypass':'Bypass zone'}</button></div>
+    <div className="form-actions"><button type="button" disabled={busy} onClick={onClose}>Cancel</button><button className="primary" disabled={busy}>{busy?'Applying…':'Clear bypass'}</button></div>
+  </form></Modal>;
+}
+
+export function SecurityCycleBypassDialog({zone,choices,availableIds,onClose,onConfirm}){
+  const [areaId,setAreaId]=useState(()=>choices.length===1?choices[0].id:'');
+  const [error,setError]=useState(''),[busy,setBusy]=useState(false);
+  const selected=choices.find(choice=>choice.id===areaId);
+  const available=availableIds.includes(areaId);
+  const nextArm=selected?.mode==='disarmed';
+  async function submit(event){
+    event.preventDefault();
+    if(busy||!selected||!available)return;
+    setBusy(true);setError('');
+    try{await onConfirm(selected);}
+    catch(cause){setError(cause.message);}
+    finally{setBusy(false);}
+  }
+  return <Modal title={'Bypass zone · '+zone.name} onClose={()=>{if(!busy)onClose();}}><form className="security-form" onSubmit={submit}>
+    {choices.length>1?<Field label="Area"><select required value={areaId} disabled={busy}
+      onChange={event=>{setAreaId(event.target.value);setError('');}}>
+      <option value="" disabled>Choose an area</option>
+      {choices.map(choice=><option key={choice.id} value={choice.id} disabled={!availableIds.includes(choice.id)}>
+        {choice.name} · {choice.mode==='disarmed'?'Next Arm Away':choice.mode==='home'?'Armed Home':'Armed Away'}
+      </option>)}
+    </select></Field>:null}
+    {selected&&available?nextArm?<p>Open the keypad to review the bypass for {selected.name} before arming Away.</p>
+      :<div className="notice warning"><strong>Until disarm</strong><p>{zone.name} will be excluded from {selected.name} for its current arming cycle.</p></div>:null}
+    {selected&&!available||!availableIds.length
+      ?<div className="notice warning" role="status">Area or zone status changed. Review the available areas again.</div>:null}
+    {error?<div className="notice critical" role="alert">{error}</div>:null}
+    <div className="form-actions"><button type="button" disabled={busy} onClick={onClose}>Cancel</button>
+      <button className="primary" disabled={busy||!available}>{busy?'Applying…':nextArm?'Review in Keypad':'Bypass until disarm'}</button>
+    </div>
   </form></Modal>;
 }
 
