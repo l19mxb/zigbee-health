@@ -29,14 +29,14 @@ function indicator(area){
   const alarm=!!area.activeAlarmCount||area.status==='alarm',armedFlashing=liveKeypadAlarm(area),invalid=!area.enabled||!(area.zoneCount>0);
   const trouble=invalid||(area.zoneTroubleCount??area.troubleCount??0)>0||issues.some(zone=>zone.trouble||['trouble','unknown'].includes(zone.status));
   const armed=['home','away'].includes(area.mode)||['home','away'].includes(area.targetMode)||['entry_delay','exit_delay'].includes(area.status);
-  const readyOn=alarm||!invalid,readyFlashing=alarm||!invalid&&issues.length>0;
-  const readyLabel=alarm?'Alarm':invalid?area.enabled?'No enabled zones':'Disabled':issues.length?'Not ready':'Ready';
+  const readyOn=!invalid,readyFlashing=readyOn&&issues.length>0;
+  const readyLabel=invalid?area.enabled?'No enabled zones':'Disabled':readyFlashing?'Not ready':'Ready';
   const armedLabel=armedFlashing?'Alarm':area.status==='exit_delay'?'Exit delay':area.status==='entry_delay'?'Entry delay':armed?(area.mode==='home'||area.targetMode==='home'?'Armed Home':'Armed Away'):'Disarmed';
   const label=alarm?(area.mode==='disarmed'?'Alarm memory':'Alarm'):armed?armedLabel:invalid?(area.enabled?'No enabled zones':'Disabled'):trouble?'Trouble':readyLabel;
   return {label,readyOn,readyFlashing,readyLabel,trouble,armed,armedLabel,armedFlashing};
 }
 function Led({tone,on=true,flashing=false,label}){return <span className={'keypad-led '+tone+(on?'':' off')+(on&&flashing?' flashing':'')} role={label?'img':undefined} aria-label={label} aria-hidden={label?undefined:true} title={label}/>;}
-function AreaIndicators({status}){return <span className="keypad-led-cluster" role="group" aria-label="Area indicators"><span><Led tone="ready" on={status.readyOn} flashing={status.readyFlashing} label={'Ready indicator: '+status.readyLabel+(status.readyFlashing?', flashing green':status.readyOn?', steady green':', off')}/><small>{status.readyLabel==='Not ready'?'Not ready':status.readyLabel==='Alarm'?'Alarm':'Ready'}</small></span><span><Led tone="trouble" on={status.trouble} label={'Trouble indicator: '+(status.trouble?'on':'off')}/><small>Trouble</small></span><span><Led tone="armed" on={status.armed} flashing={status.armedFlashing} label={'Armed indicator: '+status.armedLabel+(status.armedFlashing?', flashing red':status.armed?', on':', off')}/><small>Armed</small></span></span>;}
+function AreaIndicators({status}){return <span className="keypad-led-cluster" role="group" aria-label="Area indicators"><span><Led tone="ready" on={status.readyOn} flashing={status.readyFlashing} label={'Ready indicator: '+status.readyLabel+(status.readyFlashing?', flashing green':status.readyOn?', steady green':', off')}/><small>{status.readyFlashing?'Not ready':'Ready'}</small></span><span><Led tone="trouble" on={status.trouble} label={'Trouble indicator: '+(status.trouble?'on':'off')}/><small>Trouble</small></span><span><Led tone="armed" on={status.armed} flashing={status.armedFlashing} label={'Armed indicator: '+status.armedLabel+(status.armedFlashing?', flashing red':status.armed?', on':', off')}/><small>Armed</small></span></span>;}
 function notReadyZones(areas){
   const zones=new Map();
   for(const area of areas){

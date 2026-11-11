@@ -203,14 +203,15 @@ one third of the panel and the keypad occupies the remainder. On a phone the
 area list appears above the keypad. The clock uses the dashboard timezone.
 
 Each area has three independent indicators. The green Ready LED is steady
-when its enabled zones are normal. The same green LED flashes when any enabled
-zone is open, active, unknown or in trouble, and while the area has alarm memory.
+when all enabled zones are closed or normal. The same green LED flashes
+and reads **Not ready** when any enabled zone is open, active, unknown or
+in trouble.
 The yellow Trouble LED stays on for zone trouble. The red Armed LED stays
 on while arming or armed and flashes during a live alarm. They can be lit
 together. Disabled areas or areas without enabled zones show an unavailable
 state instead of Ready.
 Unlit LEDs are solid grey. The green flashing indicator alternates between
-green and grey, while its text continues to identify Not ready or Alarm.
+green and grey. Alarm memory appears in the area status.
 
 The keypad has a **Sound** control, remembered in that browser. When sound is
 enabled, valid keypad button presses give a short pip. An area starting its
